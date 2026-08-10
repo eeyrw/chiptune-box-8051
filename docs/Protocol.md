@@ -24,7 +24,7 @@ UART1 使用 115200 baud。请求帧为：
 | `05` | AUDIO_INFO | mix, PWM, queue state, u16 mute mask |
 | `07` | VOICE_DUMP | 10 x 8-byte hot voice state |
 | `10..15` | PLAY/STOP/PREV/NEXT/SET/STATUS | playback control |
-| `17` | FORMAT_INFO | `T10M`, version, channel count, rate |
+| `17` | FORMAT_INFO | `T10M`, version `2`, channel count, rate |
 | `18` | CHANNEL_MUTE | u16 LE, bits 0..9 |
 | `20..25` | FLASH commands | optional SPI NOR management |
 

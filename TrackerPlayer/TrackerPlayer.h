@@ -14,6 +14,7 @@
 #define TRACKER_MODE_ORDER_PLAY 0
 #define TRACKER_MODE_LIST_ONCE 1
 #define TRACKER_MODE_SINGLE 2
+#define TRACKER_MACRO_LENGTH 16
 
 typedef struct _TrackerVoiceControl {
     uint8_t increment[3];
@@ -37,20 +38,62 @@ typedef struct _TrackerControlQueue {
     volatile uint8_t underruns;
 } TrackerControlQueue;
 
-typedef struct _TrackerDecoder {
+typedef struct _TrackerInstrumentState {
+    uint8_t mode;
+    uint8_t gain;
+    int16_t relativePitch;
+    uint8_t volumeLength;
+    uint8_t volumeLoop;
+    uint8_t pitchLength;
+    uint8_t pitchLoop;
+    uint8_t volumeMacro[TRACKER_MACRO_LENGTH];
+    int8_t pitchMacro[TRACKER_MACRO_LENGTH];
+} TrackerInstrumentState;
+
+typedef struct _TrackerChannelState {
+    uint16_t note;
+    uint16_t target;
+    uint8_t instrument;
+    uint8_t volume;
+    uint8_t effect;
+    uint8_t parameter;
+    uint8_t slideUp;
+    uint8_t slideDown;
+    uint8_t portaSpeed;
+    uint8_t vibratoSpeed;
+    uint8_t vibratoDepth;
+    uint8_t volumeSlide;
+    uint8_t vibratoPhase;
+    uint8_t volumePosition;
+    uint8_t pitchPosition;
+    uint8_t gate;
+    TrackerInstrumentState definition;
+} TrackerChannelState;
+
+typedef struct _TrackerVm {
     ScoreStream trackStream;
-    ScoreStream eventStream;
-    ScoreStream loopStream;
-    TrackerControlEvent shadow;
-    uint16_t pitch[WT_VOICE_COUNT];
-    uint32_t eventSize;
-    uint32_t loopEventOffset;
-    uint32_t remainingWait;
-    uint16_t lastWait;
+    ScoreStream patternStream;
+    TrackerChannelState channel[WT_VOICE_COUNT];
+    TrackerVoiceControl output[WT_VOICE_COUNT];
+    uint32_t trackSize;
+    uint32_t patternDirectoryOffset;
+    uint32_t instrumentOffset;
+    uint32_t timingRemainder;
+    uint16_t orderCount;
+    uint16_t restartOrder;
+    uint16_t patternRows;
+    uint16_t row;
+    uint16_t order;
+    uint16_t instrumentCount;
+    uint16_t pendingReset;
+    uint16_t bpm;
+    uint8_t patternCount;
+    uint8_t speed;
+    uint8_t tick;
     uint8_t loop;
     uint8_t pendingEnd;
     uint8_t status;
-} TrackerDecoder;
+} TrackerVm;
 
 typedef struct _TrackerScheduler {
     ScoreStream playlistStream;
@@ -63,7 +106,7 @@ typedef struct _TrackerScheduler {
 } TrackerScheduler;
 
 typedef struct _TrackerPlayer {
-    TrackerDecoder decoder;
+    TrackerVm vm;
     TrackerScheduler scheduler;
 } TrackerPlayer;
 

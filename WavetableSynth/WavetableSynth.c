@@ -18,6 +18,10 @@ void WavetableSynthInit(void)
 {
     memset(&wavetableSynth, 0, sizeof(wavetableSynth));
     wavetableSynth.pwmSample = 128;
+    wavetableSynth.noiseLong = 0xACE1;
+    wavetableSynth.noiseShort = 0x5D;
+    wavetableSynth.noiseLongSample = 96;
+    wavetableSynth.noiseShortSample = 80;
 }
 
 void WavetableSynthSilence(void)

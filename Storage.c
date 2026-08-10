@@ -1,129 +1,88 @@
 #include "Storage.h"
 #include "SpiFlash.h"
 
-void storage_init_internal(void);
-uint32_t storage_get_base_addr_internal(void);
-void stream_init_internal(ScoreStream *s, uint32_t base, uint32_t size);
-void stream_sub_internal(ScoreStream *s, ScoreStream *parent, uint32_t offset, uint32_t size);
-uint8_t stream_read_internal(ScoreStream *s, uint8_t *out);
-uint8_t stream_peek_internal(ScoreStream *s, uint8_t *out);
-uint8_t stream_u8_internal(ScoreStream *s, uint32_t offset);
-uint16_t stream_u16_internal(ScoreStream *s, uint32_t offset);
-uint32_t stream_u32_internal(ScoreStream *s, uint32_t offset);
+extern MEM_CODE(unsigned char) Score[];
 
-void storage_init_spi(void);
-uint32_t storage_get_base_addr_spi(void);
-void stream_init_spi(ScoreStream *s, uint32_t base, uint32_t size);
-void stream_sub_spi(ScoreStream *s, ScoreStream *parent, uint32_t offset, uint32_t size);
-uint8_t stream_read_spi(ScoreStream *s, uint8_t *out);
-uint8_t stream_peek_spi(ScoreStream *s, uint8_t *out);
-uint8_t stream_u8_spi(ScoreStream *s, uint32_t offset);
-uint16_t stream_u16_spi(ScoreStream *s, uint32_t offset);
-uint32_t stream_u32_spi(ScoreStream *s, uint32_t offset);
-
-static struct
-{
-	void      (*init)(void);
-	uint32_t  (*get_base_addr)(void);
-	void      (*stream_init)(ScoreStream *, uint32_t, uint32_t);
-	void      (*stream_sub)(ScoreStream *, ScoreStream *, uint32_t, uint32_t);
-	uint8_t   (*stream_read)(ScoreStream *, uint8_t *);
-	uint8_t   (*stream_peek)(ScoreStream *, uint8_t *);
-	uint8_t   (*stream_u8)(ScoreStream *, uint32_t);
-	uint16_t  (*stream_u16)(ScoreStream *, uint32_t);
-	uint32_t  (*stream_u32)(ScoreStream *, uint32_t);
-} storage_ops;
-
-static uint8_t backend_type = STORAGE_BACKEND_INTERNAL;
+static uint8_t backendType = STORAGE_BACKEND_INTERNAL;
 
 void storage_select_backend(uint8_t type)
 {
-	backend_type = type;
-	if (type == STORAGE_BACKEND_SPI)
-	{
-		storage_ops.init          = storage_init_spi;
-		storage_ops.get_base_addr = storage_get_base_addr_spi;
-		storage_ops.stream_init   = stream_init_spi;
-		storage_ops.stream_sub    = stream_sub_spi;
-		storage_ops.stream_read   = stream_read_spi;
-		storage_ops.stream_peek   = stream_peek_spi;
-		storage_ops.stream_u8     = stream_u8_spi;
-		storage_ops.stream_u16    = stream_u16_spi;
-		storage_ops.stream_u32    = stream_u32_spi;
-	}
-	else
-	{
-		storage_ops.init          = storage_init_internal;
-		storage_ops.get_base_addr = storage_get_base_addr_internal;
-		storage_ops.stream_init   = stream_init_internal;
-		storage_ops.stream_sub    = stream_sub_internal;
-		storage_ops.stream_read   = stream_read_internal;
-		storage_ops.stream_peek   = stream_peek_internal;
-		storage_ops.stream_u8     = stream_u8_internal;
-		storage_ops.stream_u16    = stream_u16_internal;
-		storage_ops.stream_u32    = stream_u32_internal;
-	}
+    backendType = type == STORAGE_BACKEND_SPI ? STORAGE_BACKEND_SPI : STORAGE_BACKEND_INTERNAL;
 }
 
 uint8_t storage_get_backend(void)
 {
-	return backend_type;
+    return backendType;
 }
 
 void storage_auto_detect(void)
 {
-	uint8_t jedec[3];
-
-	SpiFlash_Init();
-	SpiFlash_ReadJedecId(jedec);
-
-	if (jedec[0] != 0xFF && jedec[0] != 0x00)
-		storage_select_backend(STORAGE_BACKEND_SPI);
-	else
-		storage_select_backend(STORAGE_BACKEND_INTERNAL);
+    uint8_t jedec[3];
+    SpiFlash_Init();
+    SpiFlash_ReadJedecId(jedec);
+    storage_select_backend(jedec[0] != 0xFF && jedec[0] != 0x00
+                           ? STORAGE_BACKEND_SPI : STORAGE_BACKEND_INTERNAL);
 }
 
 void storage_init(void)
 {
-	storage_ops.init();
+    if (backendType == STORAGE_BACKEND_SPI) SpiFlash_Init();
 }
 
 uint32_t storage_get_base_addr(void)
 {
-	return storage_ops.get_base_addr();
+    return backendType == STORAGE_BACKEND_SPI ? SPI_FLASH_BASE_ADDR
+                                               : (uint32_t)(uint16_t)Score;
 }
 
-void stream_init(ScoreStream *s, uint32_t base, uint32_t size)
+void stream_init(MEM_XDATA(ScoreStream) *stream, uint32_t base, uint32_t size)
 {
-	storage_ops.stream_init(s, base, size);
+    stream->base = base;
+    stream->pos = 0;
+    stream->size = size;
 }
 
-void stream_sub(ScoreStream *s, ScoreStream *parent, uint32_t offset, uint32_t size)
+void stream_sub(MEM_XDATA(ScoreStream) *stream, MEM_XDATA(ScoreStream) *parent,
+                uint32_t offset, uint32_t size)
 {
-	storage_ops.stream_sub(s, parent, offset, size);
+    stream->base = parent->base + offset;
+    stream->pos = 0;
+    stream->size = size;
 }
 
-uint8_t stream_read(ScoreStream *s, uint8_t *out)
+uint8_t stream_u8(MEM_XDATA(ScoreStream) *stream, uint32_t offset)
 {
-	return storage_ops.stream_read(s, out);
+    uint32_t address = stream->base + offset;
+    if (backendType == STORAGE_BACKEND_SPI) return SpiFlash_ReadCached(address);
+    return *((MEM_CODE(uint8_t) *)(uint16_t)address);
 }
 
-uint8_t stream_peek(ScoreStream *s, uint8_t *out)
+uint8_t stream_read(MEM_XDATA(ScoreStream) *stream, MEM_XDATA(uint8_t) *out)
 {
-	return storage_ops.stream_peek(s, out);
+    if (stream->pos >= stream->size) return 0;
+    *out = stream_u8(stream, stream->pos);
+    stream->pos++;
+    return 1;
 }
 
-uint8_t stream_u8(ScoreStream *s, uint32_t offset)
+uint8_t stream_peek(MEM_XDATA(ScoreStream) *stream, MEM_XDATA(uint8_t) *out)
 {
-	return storage_ops.stream_u8(s, offset);
+    if (stream->pos >= stream->size) return 0;
+    *out = stream_u8(stream, stream->pos);
+    return 1;
 }
 
-uint16_t stream_u16(ScoreStream *s, uint32_t offset)
+uint16_t stream_u16(MEM_XDATA(ScoreStream) *stream, uint32_t offset)
 {
-	return storage_ops.stream_u16(s, offset);
+    uint16_t value = stream_u8(stream, offset);
+    return value | ((uint16_t)stream_u8(stream, offset + 1) << 8);
 }
 
-uint32_t stream_u32(ScoreStream *s, uint32_t offset)
+uint32_t stream_u32(MEM_XDATA(ScoreStream) *stream, uint32_t offset)
 {
-	return storage_ops.stream_u32(s, offset);
+    uint32_t value = stream_u8(stream, offset);
+    value |= (uint32_t)stream_u8(stream, offset + 1) << 8;
+    value |= (uint32_t)stream_u8(stream, offset + 2) << 16;
+    value |= (uint32_t)stream_u8(stream, offset + 3) << 24;
+    return value;
 }

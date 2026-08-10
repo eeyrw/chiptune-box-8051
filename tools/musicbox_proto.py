@@ -154,14 +154,20 @@ class Tracker10Client:
 
     def status(self) -> None:
         data = self.command(CMD_GET_STATUS)
-        if len(data) == 4:
+        if len(data) >= 10:
+            current, count, state, parser_error, order, row, tick, speed = struct.unpack("<BBBBHHBB", data[:10])
+        elif len(data) == 4:
             current, count, state, parser_error = struct.unpack("BBBB", data)
+            order = row = tick = speed = 0
         else:
             current, count, state = struct.unpack("BBB", data)
             parser_error = 0
+            order = row = tick = speed = 0
         print(f"Track: {current}/{count}")
         print(f"State: {state} ({ {0: 'stopped', 1: 'playing', 2: 'error'}.get(state, '?') })")
         print(f"Parser error: {parser_error:#04x}")
+        if len(data) >= 10:
+            print(f"Position: order={order} row={row} tick={tick}/{speed}")
 
     def select(self, index: int) -> None:
         self.command(CMD_SET_SONG, bytes((index,)))

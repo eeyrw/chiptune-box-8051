@@ -98,7 +98,7 @@ static void dispatch(void)
         respond(pkt_cmd,STATUS_OK,data,i); break;
     }
     case CMD_GET_INFO:
-        data[0]=FW_VERSION_MAJOR; data[1]=FW_VERSION_MINOR; data[2]=STORAGE_BACKEND_INTERNAL;
+        data[0]=FW_VERSION_MAJOR; data[1]=FW_VERSION_MINOR; data[2]=storage_get_backend();
         data[3]=(uint8_t)mainPlayer.scheduler.trackCount; respond(pkt_cmd,STATUS_OK,data,4); break;
     case CMD_RESET:
         ok(pkt_cmd); wait_tx_idle(); IAP_CONTR=0x60; while(1);
@@ -131,9 +131,13 @@ static void dispatch(void)
         if(pkt_len!=1) error(pkt_cmd,STATUS_BAD_LEN); else { TrackerPlayerSelect(&mainPlayer,pkt_data[0]); ok(pkt_cmd); } break;
     case CMD_GET_STATUS:
         data[0]=(uint8_t)mainPlayer.scheduler.currentTrack; data[1]=(uint8_t)mainPlayer.scheduler.trackCount;
-        data[2]=mainPlayer.decoder.status; data[3]=trackerLastError; respond(pkt_cmd,STATUS_OK,data,4); break;
+        data[2]=mainPlayer.vm.status; data[3]=trackerLastError;
+        data[4]=(uint8_t)mainPlayer.vm.order; data[5]=(uint8_t)(mainPlayer.vm.order>>8);
+        data[6]=(uint8_t)mainPlayer.vm.row; data[7]=(uint8_t)(mainPlayer.vm.row>>8);
+        data[8]=mainPlayer.vm.tick; data[9]=mainPlayer.vm.speed;
+        respond(pkt_cmd,STATUS_OK,data,10); break;
     case CMD_FORMAT_INFO:
-        data[0]='T';data[1]='1';data[2]='0';data[3]='M';data[4]=1;data[5]=WT_VOICE_COUNT;data[6]=0x00;data[7]=0x7d;
+        data[0]='T';data[1]='1';data[2]='0';data[3]='M';data[4]=2;data[5]=WT_VOICE_COUNT;data[6]=0x00;data[7]=0x7d;
         respond(pkt_cmd,STATUS_OK,data,8); break;
     case CMD_CHANNEL_MUTE:
         if(pkt_len!=2 || (pkt_data[1]&0xfc)) error(pkt_cmd,STATUS_INVALID_PARAM);
@@ -149,16 +153,16 @@ static void dispatch(void)
     case CMD_FLASH_ERASE:
         if(storage_get_backend()!=STORAGE_BACKEND_SPI) error(pkt_cmd,STATUS_NOT_SUPPORTED);
         else if(pkt_len!=4) error(pkt_cmd,STATUS_BAD_LEN);
-        else if(mainPlayer.decoder.status==TRACKER_PLAYING) error(pkt_cmd,STATUS_NOT_SUPPORTED);
+        else if(mainPlayer.vm.status==TRACKER_PLAYING) error(pkt_cmd,STATUS_NOT_SUPPORTED);
         else respond(pkt_cmd,SpiFlash_SectorErase(read_u32(pkt_data))?STATUS_FLASH_ERR:STATUS_OK,0,0); break;
     case CMD_FLASH_ERASE_ALL:
         if(storage_get_backend()!=STORAGE_BACKEND_SPI) error(pkt_cmd,STATUS_NOT_SUPPORTED);
-        else if(mainPlayer.decoder.status==TRACKER_PLAYING) error(pkt_cmd,STATUS_NOT_SUPPORTED);
+        else if(mainPlayer.vm.status==TRACKER_PLAYING) error(pkt_cmd,STATUS_NOT_SUPPORTED);
         else respond(pkt_cmd,SpiFlash_ChipErase()?STATUS_FLASH_ERR:STATUS_OK,0,0); break;
     case CMD_FLASH_WRITE:
         if(storage_get_backend()!=STORAGE_BACKEND_SPI) error(pkt_cmd,STATUS_NOT_SUPPORTED);
         else if(pkt_len<5) error(pkt_cmd,STATUS_BAD_LEN);
-        else if(mainPlayer.decoder.status==TRACKER_PLAYING) error(pkt_cmd,STATUS_NOT_SUPPORTED);
+        else if(mainPlayer.vm.status==TRACKER_PLAYING) error(pkt_cmd,STATUS_NOT_SUPPORTED);
         else respond(pkt_cmd,SpiFlash_PageProgram(read_u32(pkt_data),pkt_data+4,pkt_len-4)?STATUS_FLASH_ERR:STATUS_OK,0,0); break;
     default: error(pkt_cmd,STATUS_UNKNOWN_CMD); break;
     }

@@ -23,11 +23,11 @@ does not parse tracker effects in real time.
 - STC8H3K64S2: 64 KiB Flash, 256 B IRAM, 3 KiB internal XRAM.
 - 32 kHz Timer0 audio ISR, register bank 1.
 - Ten fixed voices, no dynamic voice allocation.
-- Hot state is absolute DATA `0x21`, 85 bytes; keep C and `.inc` layouts equal.
+- Hot state is absolute DATA `0x21`, 90 bytes; keep C and `.inc` layouts equal.
 - Each voice: phase24, increment24, volume8, prepacked waveform offset8.
 - `WavetableSynthStep.s` is the only synthesis hot path and is unrolled ten times.
-- Main loop decodes score events and fills a four-entry XRAM queue.
-- Pitch conversion and event decompression belong in the main loop, never ISR.
+- Main loop runs the semantic tracker VM and fills a four-entry XRAM queue.
+- Pitch conversion, effects and instrument macros belong in the main loop, never ISR.
 
 Always `make clean` after changing `.inc` files because SDCC assembly dependency
 tracking is manual.
@@ -38,9 +38,9 @@ tracking is manual.
 python3 tools/tracker10_tool.py compile song.xm song.t10p --c-output scoreList.c
 ```
 
-T10M stores sample-timed state changes. Common pitch events use 8.8 note values;
-small pitch movements and repeated waits are delta-coded. Loop entry must contain
-a full ten-voice snapshot and reset compression history.
+T10M v2 stores orders, patterns, row cells and fixed instrument macros. The VM
+uses 8.8 note values and schedules tracker ticks with an exact sample remainder.
+See `docs/T10Format.md`; do not reintroduce the v1 sample-timed event stream.
 
 ## Storage
 

@@ -1,103 +1,170 @@
 # Tracker10 Architecture
 
-## Goal
+## Product boundary
 
-The target is an efficient 8-bit tracker renderer for an STC8H3K64S2, not an
-emulation of any console sound chip. The source format may be XM or another
-tracker format; the device format is deliberately independent of its source.
+Tracker10 is a generic ten-channel 8-bit wavetable tracker player for the
+STC8H3K64S2. It is not an NES, APU, VRC, MIDI or DPCM emulator. Source modules
+are compiled offline to T10P/T10M v2; the MCU never parses XM structures or
+sample data.
 
-## Split of work
+The design preserves high-level tracker structure instead of expanding a song
+into timestamped oscillator writes. Pattern reuse, effect parameter memory and
+instrument envelopes remain compact objects in the device score.
 
-The host compiler owns musical complexity. It parses patterns and order flow,
-expands tracker ticks, applies tempo/speed changes, arpeggio, tone portamento,
-vibrato and volume slides, assigns a small waveform to each source instrument,
-then emits only timestamped oscillator state changes.
+## Compilation pipeline
 
-The MCU main loop validates `T10P/T10M`, decompresses upcoming events, converts
-8.8 fixed-point pitch to a 24-bit DDS increment, and keeps a four-entry XRAM
-control queue filled. The 32 kHz ISR consumes the queue, applies all changes at
-one sample boundary, mixes ten voices, and writes the 8-bit PWM sample.
+```text
+XM bytes
+  -> bounds-checked XM parser
+  -> source patterns, orders, instruments, envelopes and decoded samples
+  -> normalized ten-channel Tracker IR
+  -> mono lowering and explicit unsupported-effect validation
+  -> sample/instrument analysis
+  -> pattern/order compaction and fixed instrument macros
+  -> T10M v2 + CRC32
+  -> T10P playlist or generated scoreList.c
+```
 
-No tracker effect parser, floating-point calculation, allocator, ADSR machine,
-SPI transaction, or serial command runs in the synthesis hot path.
+The parser reads XM instrument headers, keymaps, volume envelopes, sample
+headers, 8/16-bit delta-coded samples, loops, default gain, finetune and relative
+note. Current lowering maps the keymap entry around the middle tracker octave to
+one device instrument. A future compiler pass may split multisample key zones
+into several deduplicated T10 instruments and rewrite note cells; no MCU format
+change is required.
 
-## Hot state and memory
+XM sample `relative note` and `finetune` values calibrate the recorded sample's
+native pitch. The tonal lowering replaces that recording with a normalized
+single-cycle oscillator, so those calibration offsets are deliberately removed.
+Applying them to the oscillator would transpose the written tracker note twice.
+The T10 relative-pitch field remains available for compiler-generated timbre
+macros and future frontends; it is not copied blindly from an XM sample header.
 
-Each voice occupies exactly eight DATA bytes:
+Looped samples are resampled and correlated against the six resident tonal
+waveforms. Long non-looped samples are classified from transient length and
+high-frequency derivative energy. Tonal percussion receives a falling pitch
+macro; noisy percussion selects one of two noise modes. RMS windows produce a
+bounded 16-step volume macro. This is a deterministic compiler transform, not a
+hardcoded channel or source-instrument-number mapping.
+
+## Runtime split
+
+The main loop owns musical work:
+
+- T10P/T10M structural and range validation;
+- order and pattern traversal;
+- tracker effect memory and per-tick effect execution;
+- instrument macro execution;
+- Q8.8 pitch to 24-bit DDS increment conversion;
+- exact tracker-tick sample scheduling;
+- filling the four-entry XRAM control queue;
+- protocol and storage access.
+
+The Timer0 ISR owns only sample-boundary control application and synthesis:
+
+```text
+32 kHz interrupt
+  -> consume a due queue item
+  -> generate long and short shared noise samples
+  -> ten unrolled oscillator/mixer lanes
+  -> saturate and bias to unsigned 8-bit
+  -> write PWMA CCR2
+```
+
+No pattern parsing, division, pitch lookup, macro execution, allocation, SPI
+transaction or serial handling occurs in the synthesis hot path. P5.5 remains
+high for the complete ISR and is the hardware timing point.
+
+## Tracker VM
+
+There are ten fixed source/runtime channels and no MCU voice allocator. Each
+channel retains note and portamento target, volume, current effect, remembered
+effect parameters, vibrato phase, instrument definition and two macro cursors.
+An active 40-byte instrument record is copied from score storage to XRAM, so
+macro evaluation never thrashes the SPI cache.
+
+At roughly 50 tracker ticks per second, the VM produces a `TrackerControlEvent`.
+Only changed voices are marked, although the four queue slots have fixed size to
+keep the ISR bounded. Each event contains an exact output-sample wait. Four
+slots provide tens of milliseconds of main-loop and SPI-read tolerance.
+
+The queue producer writes a complete slot before advancing its 8-bit tail. The
+ISR reads a slot only after observing that tail. Head and tail updates are atomic
+on the 8051; queue reset disables interrupts around the shared state change.
+
+## Synthesis state
+
+Each fixed voice occupies eight absolute DATA bytes:
 
 | Bytes | Meaning |
 |---:|---|
-| 0..2 | 24-bit phase |
+| 0..2 | 24-bit oscillator phase |
 | 3..5 | 24-bit phase increment |
-| 6 | volume, 0..31 |
-| 7 | prepacked waveform offset (`wave << 4`) |
+| 6 | volume, `0..31` |
+| 7 | prepacked oscillator mode (`mode << 4`) |
 
-Ten voices consume 80 bytes. `mixOut`, `pwmSample`, and the 10-bit debug mute
-mask bring the absolute block to 85 bytes at DATA `0x21`. Register bank 1 is
-reserved for Timer0. The linked stack starts at `0x76`, leaving 138 bytes.
+Ten voices consume 80 bytes. The remaining absolute state is `mixOut` (2), PWM
+sample (1), debug mute mask (2), long noise state (2), short noise state (1) and
+two current signed noise samples (2). The complete block is 90 bytes at DATA
+`0x21`. Register bank 1 belongs to Timer0. The linked stack begins at `0x7B`,
+leaving 133 bytes.
 
-The queue and decoder live in XRAM. The optional SPI driver retains its 1 KiB
-read cache; the firmware still fits comfortably in the 3 KiB internal XRAM.
+Modes 0..5 use signed 16-sample code-memory tables. Modes 6 and 7 consume shared
+long-period and short-period LFSR samples. Both LFSRs advance once per sample,
+outside the voice expansion, so enabling a second drum voice cannot change the
+noise rate or sequence.
 
-## Synthesis
+Each lane performs mute/volume tests, oscillator selection, signed sample by
+unsigned volume multiplication, 24-bit accumulation and phase advance. The
+final sum is shifted by four, saturated to signed 8-bit and biased by 128 for
+PWM. Muting suppresses mixing but continues phase advance.
 
-There are eight signed 16-sample waveforms: square, two pulse widths, triangle,
-saw, sine-like, hollow and deterministic noise. A table index is formed from
-the top four phase bits plus the prepacked waveform offset. No interpolation is
-used. The deliberately coarse table is part of the 8-bit sound and substantially
-reduces cycles compared with generic PCM wavetable interpolation.
+## Memory and current build
 
-For every voice the assembly hot path performs a code-memory lookup, signed
-8-bit sample by unsigned volume multiplication, 24-bit accumulation and 24-bit
-phase advance. The loop is assembler-expanded ten times. After all voices the
-sum is shifted by eight, saturated to signed 8-bit, biased by 128, and written
-to PWM. A muted voice continues advancing phase, so debug unmute does not
-retrigger it.
+With the full semantic Funky Stars hardware-validation score, the current clean
+build uses:
 
-## T10P container
+| Resource | Used | Available |
+|---|---:|---:|
+| code Flash | 41,771 bytes | 65,536 bytes |
+| XRAM | 2,483 bytes | 3,072 bytes |
+| absolute DATA hot state | 90 bytes | fixed at `0x21` |
+| stack | 133 bytes | starts at `0x7B` |
+| T10P score image | 18,998 bytes | stored in code Flash or SPI |
 
-`T10P` starts with a 16-byte header: magic, version, track count, total image
-size and reserved word. Each eight-byte table entry contains a track offset and
-size. Tracks are contiguous `T10M` objects. The same image works in internal
-code Flash or at SPI address zero.
+The SPI backend retains a 1 KiB XRAM read cache. The current PCB crosses the SPI
+data lines, so `SpiFlash.c` bit-bangs P3.2 clock, P3.3 MOSI, P3.4 MISO and P3.5
+chip select. Hardware SPI must not be enabled without a board wiring change.
 
-## T10M track
+## Timing and quality verification
 
-The 32-byte header contains magic/version, voice count, flags, 32 kHz sample
-rate, event offset/size, loop event offset, total samples and reserved data.
-Time is expressed in output samples, avoiding millisecond scheduling jitter.
+`tools/tracker10/reference.py` is the host semantic reference for row/tick,
+effect-memory, macro and timing behavior. Format tests cover structural
+round-trip, CRC corruption, pattern reuse, instrument parsing and explicit
+rejection of unsupported effects.
 
-General voice events update any combination of increment, volume, waveform and
-phase reset. Frequent cases have shorter opcodes:
+CRC32 is generated and verified by the host tools. The 8051 deliberately does
+not scan the complete score at boot to calculate it; device reads remain guarded
+by range, field-mask and macro validation.
 
-- absolute 8.8 pitch, with or without phase reset;
-- signed 8-bit movement from the previous pitch for vibrato and slides;
-- packed complete note state: pitch plus five-bit volume and three-bit wave;
-- volume-only update;
-- repeated wait or signed change from the previous wait duration.
+Hardware acceptance requires:
 
-Pitch values are converted in the main loop with a 129-entry semitone increment
-table and linear interpolation. Thus an ordinary pitch event stores two bytes
-instead of a 24-bit phase increment, and a small pitch movement stores one byte.
-Loop entry begins with a full ten-voice snapshot and an absolute wait, so decoder
-history at the end of the song cannot corrupt the loop.
+- P5.5 worst-case ISR width below 25 microseconds at 32 kHz;
+- zero queue underruns after startup;
+- UART protocol responsiveness during playback;
+- audible independent tonal and both noise modes;
+- comparison of arpeggio, portamento, vibrato and retrigger passages against the
+  host reference.
 
-## Source conversion
+On the current STC8H3K64S2 board, a ten-second UART measurement advanced the
+audio-derived system clock by 10.078 seconds (about 0.3%, including command
+latency). During the same run the VM crossed multiple patterns with parser error
+zero, the four-entry queue remained full, and underruns remained zero. Hardware
+listening also exposed and verified the fix for source-sample tuning metadata:
+copying XM `relative note` into a normalized oscillator had transposed individual
+instruments by as much as 17 semitones.
 
-`tools/tracker10_tool.py` currently accepts FastTracker II XM. It maps all ten
-source channels directly to ten logical device channels. It does not collapse
-voices into NES-style roles. Instrument samples are presently approximated by
-the eight resident waveforms; percussion uses the deterministic noise waveform.
+Generated or downloaded music used for listening tests must have clear
+redistribution permission before it is retained in a public repository. The
+source XM for the current local Funky Stars conversion is intentionally absent.
 
-Future sample support should be a generic optional 4-bit ADPCM one-shot layer.
-It must not expose NES DPCM registers or change the ten-channel tracker model.
-With internal Flash, samples are admitted only after the event stream and code
-budget are known; the current full Funky Stars event image leaves roughly 8 KiB
-after retaining the SPI backend.
-
-## Storage
-
-At boot, `storage_auto_detect()` reads the SPI JEDEC ID. A valid response selects
-the SPI backend; `0x00/0xFF` selects the internal code-Flash image. The player
-only uses `ScoreStream`, so synthesis and decoding do not depend on the backend.
-The current physical board may omit the SPI NOR without requiring a build flag.
+The complete byte-level contract is in [T10Format.md](T10Format.md).

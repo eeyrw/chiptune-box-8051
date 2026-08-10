@@ -1,5 +1,5 @@
-; Ten fixed wavetable voices. Tracker semantics are compiled on the host;
-; this 32 kHz hot path only performs lookup, multiply, accumulation and phase advance.
+; Ten fixed voices. Tracker semantics and envelopes run in the main loop;
+; this 32 kHz hot path only generates two noise sources, mixes and advances phase.
     .module WAVETABLE_SYNTH_STEP
     .include "WavetableSynth.inc"
 
@@ -12,6 +12,48 @@ _WavetableSynthStep::
     mov r5,#0
     mov r6,#0
     mov r7,#0
+
+    ; One long-period Galois LFSR shared by all mode-6 voices.
+    mov a,(WT_SYNTH_ABS_ADDR + WT_NOISE_LONG_OFFSET)
+    jnb acc.0,wt_long_zero$
+    mov a,(WT_SYNTH_ABS_ADDR + WT_NOISE_LONG_OFFSET + 1)
+    clr c
+    rrc a
+    mov (WT_SYNTH_ABS_ADDR + WT_NOISE_LONG_OFFSET + 1),a
+    mov a,(WT_SYNTH_ABS_ADDR + WT_NOISE_LONG_OFFSET)
+    rrc a
+    mov (WT_SYNTH_ABS_ADDR + WT_NOISE_LONG_OFFSET),a
+    mov a,(WT_SYNTH_ABS_ADDR + WT_NOISE_LONG_OFFSET + 1)
+    xrl a,#0xB4
+    mov (WT_SYNTH_ABS_ADDR + WT_NOISE_LONG_OFFSET + 1),a
+    mov (WT_SYNTH_ABS_ADDR + WT_NOISE_LONG_SAMPLE_OFFSET),#96
+    sjmp wt_long_done$
+wt_long_zero$:
+    mov a,(WT_SYNTH_ABS_ADDR + WT_NOISE_LONG_OFFSET + 1)
+    clr c
+    rrc a
+    mov (WT_SYNTH_ABS_ADDR + WT_NOISE_LONG_OFFSET + 1),a
+    mov a,(WT_SYNTH_ABS_ADDR + WT_NOISE_LONG_OFFSET)
+    rrc a
+    mov (WT_SYNTH_ABS_ADDR + WT_NOISE_LONG_OFFSET),a
+    mov (WT_SYNTH_ABS_ADDR + WT_NOISE_LONG_SAMPLE_OFFSET),#0xA0
+wt_long_done$:
+
+    ; A short 7-bit source gives metallic/periodic mode-7 percussion.
+    mov a,(WT_SYNTH_ABS_ADDR + WT_NOISE_SHORT_OFFSET)
+    jnb acc.0,wt_short_zero$
+    clr c
+    rrc a
+    xrl a,#0x60
+    mov (WT_SYNTH_ABS_ADDR + WT_NOISE_SHORT_OFFSET),a
+    mov (WT_SYNTH_ABS_ADDR + WT_NOISE_SHORT_SAMPLE_OFFSET),#80
+    sjmp wt_short_done$
+wt_short_zero$:
+    clr c
+    rrc a
+    mov (WT_SYNTH_ABS_ADDR + WT_NOISE_SHORT_OFFSET),a
+    mov (WT_SYNTH_ABS_ADDR + WT_NOISE_SHORT_SAMPLE_OFFSET),#0xB0
+wt_short_done$:
 
 .irp Idx,0,1,2,3,4,5,6,7,8,9
     pVoice = WT_SYNTH_ABS_ADDR + Idx * WT_VOICE_SIZE
@@ -29,13 +71,24 @@ _WavetableSynthStep::
     jz wt_phase'Idx'$
     mov r4,a
 
-    ; 8 waveforms x 16 samples: offset is prepacked as waveform << 4.
+    mov a,(pVoice + WT_WAVE_OFFSET)
+    cjne a,#0x60,wt_try_short_noise'Idx'$
+    mov a,(WT_SYNTH_ABS_ADDR + WT_NOISE_LONG_SAMPLE_OFFSET)
+    sjmp wt_sample'Idx'$
+wt_try_short_noise'Idx'$:
+    cjne a,#0x70,wt_table'Idx'$
+    mov a,(WT_SYNTH_ABS_ADDR + WT_NOISE_SHORT_SAMPLE_OFFSET)
+    sjmp wt_sample'Idx'$
+
+    ; Six tonal waveforms use 16 samples and a prepacked waveform << 4 offset.
+wt_table'Idx'$:
     mov a,(pVoice + WT_PHASE_2)
     swap a
     anl a,#0x0f
     orl a,(pVoice + WT_WAVE_OFFSET)
     mov dptr,#_waveTables
     movc a,@a+dptr
+wt_sample'Idx'$:
     mov b,r4
     jb a.7,wt_neg'Idx'$
 
@@ -80,7 +133,7 @@ wt_phase'Idx'$:
     mov (pVoice + WT_PHASE_2),a
 .endm
 
-    ; Signed 24-bit sum >> 4: first take >>8, then apply a fixed 16x master gain.
+    ; Signed 24-bit sum >> 4, saturated to signed 8-bit, then biased for PWM.
     mov a,r6
     mov r5,a
     mov a,r7

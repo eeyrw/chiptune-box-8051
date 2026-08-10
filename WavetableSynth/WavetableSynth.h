@@ -20,6 +20,10 @@ typedef struct _WavetableSynthState {
     int16_t mixOut;
     uint8_t pwmSample;
     uint16_t muteMask;
+    uint16_t noiseLong;
+    uint8_t noiseShort;
+    int8_t noiseLongSample;
+    int8_t noiseShortSample;
 } WavetableSynthState;
 
 extern MEM_FAST_DATA(WavetableSynthState) wavetableSynth;

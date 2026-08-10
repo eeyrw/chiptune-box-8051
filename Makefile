@@ -63,8 +63,6 @@ SRC 	+= Bsp.c
 SRC 	+= Protocol.c
 
 SRC 	+= Storage.c
-SRC 	+= Storage_Internal.c
-SRC 	+= Storage_SPI.c
 SRC 	+= SpiFlash.c
 SRC 	+= scoreList.c
 
