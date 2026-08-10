@@ -1,36 +1,26 @@
 #include <stdint.h>
-#include <stdio.h>
-#include <string.h>
-#include "Player.h"
+#include "TrackerPlayer.h"
+#include "WavetableSynth.h"
 #include "Bsp.h"
 #include "Protocol.h"
 #include "Storage.h"
 
-extern void TestProcess(void);
-MEM_XDATA(Player) mainPlayer;
+MEM_XDATA(TrackerPlayer) mainPlayer;
 
 void main()
 {
-	PlayerInit(&mainPlayer, &synthForAsm);
 	HardwareInit();
-	AdsrInit();
 	Proto_Init();
-
-#ifndef RUN_TEST
+	WavetableSynthInit();
+	TrackerPlayerInit(&mainPlayer);
 	storage_auto_detect();
-	StartPlayScheduler(&mainPlayer, MODE_LIST_ONCE);
-
-	SynthDitherInit(&synthForAsm, GetRandom() | ((uint16_t)GetRandom() << 8));
-	SchedulerPlaySong(&mainPlayer, GetRandom() % 5);
+	TrackerPlayerStart(&mainPlayer, TRACKER_MODE_ORDER_PLAY);
+	TrackerPlayerProcess(&mainPlayer);
 	StartAudioOutput();
-#else
-	TestProcess();
-#endif
 
 	while (1)
 	{
-		SynthProcess();
-		PlayerProcess(&mainPlayer);
+		TrackerPlayerProcess(&mainPlayer);
 		Proto_Process();
 	}
 }

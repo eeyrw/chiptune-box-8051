@@ -22,7 +22,7 @@ def build_frame(cmd, payload=b""):
 
 
 def main():
-    port = sys.argv[1] if len(sys.argv) > 1 else "/dev/ttyUSB0"
+    port = sys.argv[1] if len(sys.argv) > 1 else "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0"
     baud = int(sys.argv[2]) if len(sys.argv) > 2 else 115200
 
     frame = build_frame(CMD_RESET)

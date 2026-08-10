@@ -1,5 +1,5 @@
 #include "RegisterDefine.h"
-#include "Player.h"
+#include "TrackerPlayer.h"
 #include "Bsp.h"
 #include "Protocol.h"
 
@@ -16,7 +16,6 @@
 #define CCP_S0 0x10 //P_SW1.4
 #define CCP_S1 0x20 //P_SW1.5
 
-extern MEM_XDATA(Player) mainPlayer;
 void ADC_Inilize(void);
 
 /********************* UART1中断函数************************/
@@ -199,7 +198,8 @@ void ADC_Inilize(void)
     //ADCCFG &= ~(1<<5);	//AD转换结果左对齐。
     //EADC = 1;			//中断允许		ENABLE,DISABLE
     EADC = 0;
-    ADC_Priority(Priority_0); //指定中断优先级(低到高) Priority_0,Priority_1,Priority_2,Priority_3
+    IPH &= ~PADCH;
+    PADC = 0; // ADC interrupt priority 0
 
     P_SW2 |= 0x80;
     ADCTIM = (ADC_CsSetup << 7) | (ADC_CsHold << 5) | ADC_SMPduty; //设置 ADC 内部时序，ADC采样时间建议设最大值

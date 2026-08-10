@@ -1,8 +1,0 @@
-; Sample name: Square Wave C5
-; Sample's base frequency: 524.4774968507006 Hz
-; Sample's sample rate: 32000 Hz
-
-WAVETABLE_LEN=1389
-WAVETABLE_ATTACK_LEN=1328
-WAVETABLE_LOOP_LEN=61
-WAVETABLE_ACTUAL_LEN=1390

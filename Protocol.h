@@ -15,10 +15,6 @@
 #define CMD_ADC_READ      0x06
 #define CMD_VOICE_DUMP    0x07
 #define CMD_SYS_INFO      0x08
-#define CMD_NOTE_ON       0x09
-#define CMD_NOTE_OFF      0x0A
-#define CMD_FAST_NOTE_ON  0x0B
-#define CMD_FAST_NOTE_OFF 0x0C
 #define CMD_PANIC         0x0D
 
 #define CMD_PLAY          0x10
@@ -27,9 +23,8 @@
 #define CMD_NEXT          0x13
 #define CMD_SET_SONG      0x14
 #define CMD_GET_STATUS    0x15
-
-#define CMD_ADSR_GET      0x30
-#define CMD_ADSR_SET      0x31
+#define CMD_FORMAT_INFO   0x17
+#define CMD_CHANNEL_MUTE  0x18
 
 #define CMD_FLASH_INFO    0x20
 #define CMD_FLASH_ERASE   0x21
@@ -47,8 +42,8 @@
 #define STATUS_INVALID_ADDR    0x06
 #define STATUS_INVALID_PARAM   0x07
 
-#define FW_VERSION_MAJOR  1
-#define FW_VERSION_MINOR  0
+#define FW_VERSION_MAJOR  0
+#define FW_VERSION_MINOR  1
 
 #define PSTATE_IDLE     0
 #define PSTATE_CMD      1

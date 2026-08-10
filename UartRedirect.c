@@ -7,6 +7,9 @@
  */
 int putchar(int c)
 {
+	uint8_t serial_irq = ES;
+	ES = 0;
+
 	if (c == '\n')
 	{
 		SBUF = '\r';
@@ -26,6 +29,7 @@ int putchar(int c)
 		TI = 0;
 	}
 
+	ES = serial_irq;
 	return c;
 }
 

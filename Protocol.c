@@ -1,643 +1,182 @@
 #include "Protocol.h"
 #include "RegisterDefine.h"
-#include "Player.h"
+#include "TrackerPlayer.h"
+#include "WavetableSynth.h"
 #include "Bsp.h"
-#include "SpiFlash.h"
 #include "Storage.h"
+#include "SpiFlash.h"
 
-#define RX_BUF_SIZE  256
-#define RX_MASK      (RX_BUF_SIZE - 1)
+#define RX_BUF_SIZE 128
+#define RX_MASK 127
+#define PKT_BUF_SIZE 128
+#define TX_BUF_SIZE 128
 
-#define PKT_BUF_SIZE 260
-#define TX_BUF_SIZE  264
+static MEM_XDATA(uint8_t) rx_ring[RX_BUF_SIZE];
+static volatile uint8_t rx_wr, rx_rd;
+static MEM_XDATA(uint8_t) pkt_data[PKT_BUF_SIZE];
+static uint8_t pkt_len, pkt_pos, pkt_state, pkt_csum, pkt_cmd;
+static MEM_XDATA(uint8_t) tx_buf[TX_BUF_SIZE];
+static volatile uint8_t tx_len, tx_pos, tx_state;
 
-static MEM_XDATA(uint8_t)  rx_ring[RX_BUF_SIZE];
-static volatile uint8_t  rx_wr;
-static volatile uint8_t  rx_rd;
-
-static MEM_XDATA(uint8_t)  pkt_data[PKT_BUF_SIZE];
-static uint8_t           pkt_len;
-static uint8_t           pkt_pos;
-static uint8_t           pkt_state;
-static uint8_t           pkt_csum;
-static uint8_t           pkt_cmd;
-
-static MEM_XDATA(uint8_t)  tx_buf[TX_BUF_SIZE];
-static volatile uint8_t  tx_len;
-static volatile uint8_t  tx_pos;
-static volatile uint8_t  tx_state;
-
-
-extern MEM_XDATA(Player) mainPlayer;
-
-static uint8_t calc_csum(uint8_t start, uint8_t count)
+static void wait_tx_idle(void)
 {
-	uint8_t i;
-	uint8_t csum = 0;
-	for (i = 0; i < count; i++)
-		csum ^= tx_buf[start + i];
-	return csum;
+    uint32_t started=GetSysMs();
+    while(tx_state!=TX_IDLE) {
+        if((uint32_t)(GetSysMs()-started)>20UL) {
+            ES=0;
+            tx_state=TX_IDLE;
+            ES=1;
+            break;
+        }
+    }
+}
+
+static uint8_t checksum(uint8_t start, uint8_t count)
+{
+    uint8_t i, c=0;
+    for (i=0;i<count;i++) c^=tx_buf[start+i];
+    return c;
 }
 
 static void start_tx(void)
 {
-	ES = 0;
-	tx_pos  = 1;
-	tx_state = TX_SENDING;
-	SBUF = tx_buf[0];
-	ES = 1;
+    ES=0; tx_pos=1; tx_state=TX_SENDING; SBUF=tx_buf[0]; ES=1;
 }
 
-static void build_response_header(uint8_t cmd, uint8_t status, uint8_t len)
+static void respond(uint8_t cmd,uint8_t status,const uint8_t *data,uint8_t len)
 {
-	tx_buf[0] = PROTO_SYNC;
-	tx_buf[1] = cmd | PROTO_RSP_FLAG;
-	tx_buf[2] = status;
-	tx_buf[3] = len;
-	tx_len    = 5 + len;
+    uint8_t i;
+    wait_tx_idle();
+    tx_buf[0]=PROTO_SYNC; tx_buf[1]=cmd|PROTO_RSP_FLAG; tx_buf[2]=status; tx_buf[3]=len;
+    for(i=0;i<len;i++) tx_buf[4+i]=data[i];
+    tx_buf[4+len]=checksum(1,3+len); tx_len=5+len; start_tx();
 }
 
-static void send_simple_response(uint8_t cmd, uint8_t status)
+static void ok(uint8_t cmd) { respond(cmd,STATUS_OK,0,0); }
+static void error(uint8_t cmd,uint8_t status) { respond(cmd,status,0,0); }
+
+static uint32_t read_u32(const uint8_t *p)
 {
-	while (tx_state != TX_IDLE);
-	build_response_header(cmd, status, 0);
-	tx_buf[4] = calc_csum(1, 3);
-	tx_len = 5;
-	start_tx();
+    return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24);
 }
 
-static void send_data_response(uint8_t cmd, uint8_t status,
-                               const uint8_t *data, uint8_t len)
+static void flash_info(void)
 {
-	uint8_t i;
-	while (tx_state != TX_IDLE);
-	build_response_header(cmd, status, len);
-	for (i = 0; i < len; i++)
-		tx_buf[4 + i] = data[i];
-	tx_buf[4 + len] = calc_csum(1, 3 + len);
-	tx_len = 5 + len;
-	start_tx();
+    uint8_t data[9];
+    SpiFlash_ReadJedecId(data);
+    data[3]=(uint8_t)(SPI_FLASH_SIZE>>24); data[4]=(uint8_t)(SPI_FLASH_SIZE>>16);
+    data[5]=(uint8_t)(SPI_FLASH_SIZE>>8); data[6]=(uint8_t)SPI_FLASH_SIZE;
+    data[7]=(uint8_t)(SPI_FLASH_SECTOR_SIZE>>8); data[8]=(uint8_t)SPI_FLASH_SECTOR_SIZE;
+    respond(CMD_FLASH_INFO,STATUS_OK,data,9);
 }
 
-static void send_response_ok(uint8_t cmd)
+static void flash_read(void)
 {
-	send_simple_response(cmd, STATUS_OK);
+    uint8_t data[120];
+    uint8_t i, length;
+    uint32_t address;
+    if(pkt_len!=6) { error(CMD_FLASH_READ,STATUS_BAD_LEN); return; }
+    address=read_u32(pkt_data); length=pkt_data[4];
+    if(pkt_data[5] || length>sizeof(data) || address>SPI_FLASH_SIZE || length>SPI_FLASH_SIZE-address) {
+        error(CMD_FLASH_READ,STATUS_INVALID_ADDR); return;
+    }
+    for(i=0;i<length;i++) data[i]=SpiFlash_ReadByte(address+i);
+    respond(CMD_FLASH_READ,STATUS_OK,data,length);
 }
 
-static void send_response_err(uint8_t cmd, uint8_t err)
+static void dispatch(void)
 {
-	send_simple_response(cmd, err);
+    uint8_t data[84];
+    uint8_t i,j;
+    uint32_t now;
+    int16_t mix;
+    PlatformIrqState irq;
+    switch(pkt_cmd) {
+    case CMD_PING: {
+        const char *s="TRACKER10-8051 v0.1";
+        for(i=0;s[i];i++) data[i]=(uint8_t)s[i];
+        respond(pkt_cmd,STATUS_OK,data,i); break;
+    }
+    case CMD_GET_INFO:
+        data[0]=FW_VERSION_MAJOR; data[1]=FW_VERSION_MINOR; data[2]=STORAGE_BACKEND_INTERNAL;
+        data[3]=(uint8_t)mainPlayer.scheduler.trackCount; respond(pkt_cmd,STATUS_OK,data,4); break;
+    case CMD_RESET:
+        ok(pkt_cmd); wait_tx_idle(); IAP_CONTR=0x60; while(1);
+    case CMD_UPTIME:
+        now=GetSysMs(); data[0]=now; data[1]=now>>8; data[2]=now>>16; data[3]=now>>24;
+        respond(pkt_cmd,STATUS_OK,data,4); break;
+    case CMD_MEM_INFO:
+        data[0]=SP; data[1]=0xff-SP; data[2]=0; data[3]=0; respond(pkt_cmd,STATUS_OK,data,4); break;
+    case CMD_AUDIO_INFO:
+        Platform_IrqSave(irq); mix=wavetableSynth.mixOut; Platform_IrqRestore(irq);
+        data[0]=mix; data[1]=mix>>8; data[2]=wavetableSynth.pwmSample;
+        data[3]=trackerQueue.underruns; data[4]=trackerQueue.head; data[5]=trackerQueue.tail;
+        data[6]=wavetableSynth.muteMask; data[7]=wavetableSynth.muteMask>>8;
+        respond(pkt_cmd,STATUS_OK,data,8); break;
+    case CMD_ADC_READ:
+        if(pkt_len!=1) error(pkt_cmd,STATUS_BAD_LEN);
+        else { uint16_t v=Get_ADCResult(pkt_data[0]); data[0]=v>>8; data[1]=v; respond(pkt_cmd,STATUS_OK,data,2); } break;
+    case CMD_VOICE_DUMP:
+        for(i=0,j=0;i<WT_VOICE_COUNT;i++) {
+            data[j++]=wavetableSynth.voice[i].phase[0]; data[j++]=wavetableSynth.voice[i].phase[1]; data[j++]=wavetableSynth.voice[i].phase[2];
+            data[j++]=wavetableSynth.voice[i].increment[0]; data[j++]=wavetableSynth.voice[i].increment[1]; data[j++]=wavetableSynth.voice[i].increment[2];
+            data[j++]=wavetableSynth.voice[i].volume; data[j++]=wavetableSynth.voice[i].waveOffset>>4;
+        }
+        respond(pkt_cmd,STATUS_OK,data,j); break;
+    case CMD_PANIC: case CMD_STOP: TrackerPlayerStop(&mainPlayer); ok(pkt_cmd); break;
+    case CMD_PLAY: TrackerPlayerPlay(&mainPlayer); ok(pkt_cmd); break;
+    case CMD_PREV: TrackerPlayerPrevious(&mainPlayer); ok(pkt_cmd); break;
+    case CMD_NEXT: TrackerPlayerNext(&mainPlayer); ok(pkt_cmd); break;
+    case CMD_SET_SONG:
+        if(pkt_len!=1) error(pkt_cmd,STATUS_BAD_LEN); else { TrackerPlayerSelect(&mainPlayer,pkt_data[0]); ok(pkt_cmd); } break;
+    case CMD_GET_STATUS:
+        data[0]=(uint8_t)mainPlayer.scheduler.currentTrack; data[1]=(uint8_t)mainPlayer.scheduler.trackCount;
+        data[2]=mainPlayer.decoder.status; data[3]=trackerLastError; respond(pkt_cmd,STATUS_OK,data,4); break;
+    case CMD_FORMAT_INFO:
+        data[0]='T';data[1]='1';data[2]='0';data[3]='M';data[4]=1;data[5]=WT_VOICE_COUNT;data[6]=0x00;data[7]=0x7d;
+        respond(pkt_cmd,STATUS_OK,data,8); break;
+    case CMD_CHANNEL_MUTE:
+        if(pkt_len!=2 || (pkt_data[1]&0xfc)) error(pkt_cmd,STATUS_INVALID_PARAM);
+        else { WavetableSynthSetMuteMask((uint16_t)pkt_data[0]|((uint16_t)pkt_data[1]<<8)); ok(pkt_cmd); } break;
+    case CMD_SYS_INFO:
+    case CMD_FLASH_INFO:
+        if(storage_get_backend()!=STORAGE_BACKEND_SPI) error(pkt_cmd,STATUS_NOT_SUPPORTED); else flash_info(); break;
+    case CMD_FLASH_READ_ID:
+        if(storage_get_backend()!=STORAGE_BACKEND_SPI) error(pkt_cmd,STATUS_NOT_SUPPORTED);
+        else { SpiFlash_ReadJedecId(data); respond(pkt_cmd,STATUS_OK,data,3); } break;
+    case CMD_FLASH_READ:
+        if(storage_get_backend()!=STORAGE_BACKEND_SPI) error(pkt_cmd,STATUS_NOT_SUPPORTED); else flash_read(); break;
+    case CMD_FLASH_ERASE:
+        if(storage_get_backend()!=STORAGE_BACKEND_SPI) error(pkt_cmd,STATUS_NOT_SUPPORTED);
+        else if(pkt_len!=4) error(pkt_cmd,STATUS_BAD_LEN);
+        else if(mainPlayer.decoder.status==TRACKER_PLAYING) error(pkt_cmd,STATUS_NOT_SUPPORTED);
+        else respond(pkt_cmd,SpiFlash_SectorErase(read_u32(pkt_data))?STATUS_FLASH_ERR:STATUS_OK,0,0); break;
+    case CMD_FLASH_ERASE_ALL:
+        if(storage_get_backend()!=STORAGE_BACKEND_SPI) error(pkt_cmd,STATUS_NOT_SUPPORTED);
+        else if(mainPlayer.decoder.status==TRACKER_PLAYING) error(pkt_cmd,STATUS_NOT_SUPPORTED);
+        else respond(pkt_cmd,SpiFlash_ChipErase()?STATUS_FLASH_ERR:STATUS_OK,0,0); break;
+    case CMD_FLASH_WRITE:
+        if(storage_get_backend()!=STORAGE_BACKEND_SPI) error(pkt_cmd,STATUS_NOT_SUPPORTED);
+        else if(pkt_len<5) error(pkt_cmd,STATUS_BAD_LEN);
+        else if(mainPlayer.decoder.status==TRACKER_PLAYING) error(pkt_cmd,STATUS_NOT_SUPPORTED);
+        else respond(pkt_cmd,SpiFlash_PageProgram(read_u32(pkt_data),pkt_data+4,pkt_len-4)?STATUS_FLASH_ERR:STATUS_OK,0,0); break;
+    default: error(pkt_cmd,STATUS_UNKNOWN_CMD); break;
+    }
 }
 
-static uint8_t adsr_rate_valid(uint16_t rate, uint8_t allow_zero)
+static void reset_parser(void) { pkt_state=PSTATE_IDLE; pkt_pos=0; pkt_csum=0; }
+static void process_byte(uint8_t b)
 {
-	if (rate == 0)
-		return allow_zero;
-	return rate <= ADSR_RATE_MAX;
+    switch(pkt_state) {
+    case PSTATE_IDLE: if(b==PROTO_SYNC){pkt_state=PSTATE_CMD;pkt_csum=0;} break;
+    case PSTATE_CMD: pkt_cmd=b;pkt_csum^=b;pkt_state=PSTATE_LEN;break;
+    case PSTATE_LEN: pkt_len=b;pkt_csum^=b;pkt_pos=0;pkt_state=b?PSTATE_DATA:PSTATE_CSUM;break;
+    case PSTATE_DATA: if(pkt_pos<PKT_BUF_SIZE)pkt_data[pkt_pos]=b;pkt_pos++;pkt_csum^=b;if(pkt_pos>=pkt_len)pkt_state=PSTATE_CSUM;break;
+    case PSTATE_CSUM: if(b==pkt_csum)dispatch();reset_parser();break;
+    }
 }
 
-static void proto_rx_put(uint8_t byte)
-{
-	uint8_t next = (rx_wr + 1) & RX_MASK;
-	if (next != rx_rd)
-	{
-		rx_ring[rx_wr] = byte;
-		rx_wr = next;
-	}
-}
-
-static uint8_t proto_rx_available(void)
-{
-	return rx_wr != rx_rd;
-}
-
-static uint8_t proto_rx_get(void)
-{
-	uint8_t byte = rx_ring[rx_rd];
-	rx_rd = (rx_rd + 1) & RX_MASK;
-	return byte;
-}
-
-static void reset_parser(void)
-{
-	pkt_state = PSTATE_IDLE;
-	pkt_pos   = 0;
-	pkt_csum  = 0;
-}
-
-static void dispatch_command(void);
-
-static void process_rx_byte(uint8_t byte)
-{
-	switch (pkt_state)
-	{
-	case PSTATE_IDLE:
-		if (byte == PROTO_SYNC)
-		{
-			pkt_state = PSTATE_CMD;
-			pkt_csum  = 0;
-			pkt_pos   = 0;
-		}
-		return;
-
-	case PSTATE_CMD:
-		pkt_cmd  = byte;
-		pkt_csum ^= byte;
-		pkt_state = PSTATE_LEN;
-		return;
-
-	case PSTATE_LEN:
-		pkt_len  = byte;
-		pkt_csum ^= byte;
-		if (pkt_len == 0)
-			pkt_state = PSTATE_CSUM;
-		else
-		{
-			pkt_state = PSTATE_DATA;
-			pkt_pos   = 0;
-		}
-		return;
-
-	case PSTATE_DATA:
-		pkt_data[pkt_pos] = byte;
-		pkt_csum ^= byte;
-		pkt_pos++;
-		if (pkt_pos >= pkt_len)
-			pkt_state = PSTATE_CSUM;
-		return;
-
-	case PSTATE_CSUM:
-		if (byte == pkt_csum)
-			dispatch_command();
-		reset_parser();
-		return;
-	}
-}
-
-static uint32_t read_u32_le(const uint8_t *p)
-{
-	return (uint32_t)p[0]
-	     | ((uint32_t)p[1] << 8)
-	     | ((uint32_t)p[2] << 16)
-	     | ((uint32_t)p[3] << 24);
-}
-
-static uint16_t read_u16_le(const uint8_t *p)
-{
-	return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
-}
-
-static uint16_t read_u16_be(const uint8_t *p)
-{
-	return ((uint16_t)p[0] << 8) | (uint16_t)p[1];
-}
-
-static void write_u16_be(uint8_t *p, uint16_t v)
-{
-	p[0] = (uint8_t)(v >> 8);
-	p[1] = (uint8_t)v;
-}
-
-static uint8_t flash_read_id_buf[3];
-
-static void cmd_flash_info(void)
-{
-	uint8_t buf[9];
-	SpiFlash_ReadJedecId(flash_read_id_buf);
-	buf[0] = flash_read_id_buf[0];
-	buf[1] = flash_read_id_buf[1];
-	buf[2] = flash_read_id_buf[2];
-	buf[3] = (SPI_FLASH_SIZE >> 24) & 0xFF;
-	buf[4] = (SPI_FLASH_SIZE >> 16) & 0xFF;
-	buf[5] = (SPI_FLASH_SIZE >> 8)  & 0xFF;
-	buf[6] =  SPI_FLASH_SIZE        & 0xFF;
-	buf[7] = (SPI_FLASH_SECTOR_SIZE >> 8) & 0xFF;
-	buf[8] =  SPI_FLASH_SECTOR_SIZE       & 0xFF;
-	send_data_response(CMD_FLASH_INFO, STATUS_OK, buf, 9);
-}
-
-static void cmd_flash_read_id(void)
-{
-	SpiFlash_ReadJedecId(flash_read_id_buf);
-	send_data_response(CMD_FLASH_READ_ID, STATUS_OK, flash_read_id_buf, 3);
-}
-
-static void cmd_flash_read(void)
-{
-	uint16_t i;
-	uint8_t *out;
-
-	if (pkt_len < 6)
-	{
-		send_response_err(CMD_FLASH_READ, STATUS_BAD_LEN);
-		return;
-	}
-
-	uint32_t addr = read_u32_le(pkt_data);
-	uint16_t len  = read_u16_le(pkt_data + 4);
-
-	if (len > 252)
-	{
-		send_response_err(CMD_FLASH_READ, STATUS_BAD_LEN);
-		return;
-	}
-
-	while (tx_state != TX_IDLE);
-	build_response_header(CMD_FLASH_READ, STATUS_OK, len);
-	out = tx_buf + 4;
-	for (i = 0; i < len; i++)
-		out[i] = SpiFlash_ReadByte(addr + (uint32_t)i);
-	tx_buf[4 + len] = calc_csum(1, 3 + len);
-	tx_len = 5 + len;
-
-	SpiFlash_CacheInvalidate();
-	start_tx();
-}
-
-static void cmd_flash_erase(void)
-{
-	if (pkt_len < 4)
-	{
-		send_response_err(CMD_FLASH_ERASE, STATUS_BAD_LEN);
-		return;
-	}
-	if (SpiFlash_SectorErase(read_u32_le(pkt_data)))
-		send_response_err(CMD_FLASH_ERASE, STATUS_FLASH_ERR);
-	else
-		send_response_ok(CMD_FLASH_ERASE);
-}
-
-static void cmd_flash_erase_all(void)
-{
-	if (SpiFlash_ChipErase())
-		send_response_err(CMD_FLASH_ERASE_ALL, STATUS_FLASH_ERR);
-	else
-		send_response_ok(CMD_FLASH_ERASE_ALL);
-}
-
-static void cmd_flash_write(void)
-{
-	if (pkt_len < 5)
-	{
-		send_response_err(CMD_FLASH_WRITE, STATUS_BAD_LEN);
-		return;
-	}
-	if (SpiFlash_PageProgram(read_u32_le(pkt_data), pkt_data + 4, pkt_len - 4))
-		send_response_err(CMD_FLASH_WRITE, STATUS_FLASH_ERR);
-	else
-		send_response_ok(CMD_FLASH_WRITE);
-}
-
-static void flash_not_supported(uint8_t cmd)
-{
-	send_response_err(cmd, STATUS_NOT_SUPPORTED);
-}
-
-static void dispatch_command(void)
-{
-	switch (pkt_cmd)
-	{
-	case CMD_PING:
-	{
-		const char *ver = "MusicBox-8051 v1.0";
-		uint8_t len;
-		for (len = 0; ver[len]; len++);
-		send_data_response(CMD_PING, STATUS_OK, (const uint8_t *)ver, len);
-		break;
-	}
-
-	case CMD_GET_INFO:
-	{
-		uint8_t buf[4];
-		MEM_XDATA(Player) *p = &mainPlayer;
-		buf[0] = FW_VERSION_MAJOR;
-		buf[1] = FW_VERSION_MINOR;
-		buf[2] = storage_get_backend();
-		buf[3] = (uint8_t)(p->scheduler.maxScoreNum & 0xFF);
-		send_data_response(CMD_GET_INFO, STATUS_OK, buf, 4);
-		break;
-	}
-
-	case CMD_RESET:
-		send_response_ok(CMD_RESET);
-		while (tx_state != TX_IDLE);
-		IAP_CONTR = 0x60;
-		while (1);
-		break;
-
-	case CMD_UPTIME:
-	{
-		uint32_t ms = GetSysMs();
-		uint8_t buf[4];
-		buf[0] = (uint8_t)(ms);
-		buf[1] = (uint8_t)(ms >> 8);
-		buf[2] = (uint8_t)(ms >> 16);
-		buf[3] = (uint8_t)(ms >> 24);
-		send_data_response(CMD_UPTIME, STATUS_OK, buf, 4);
-		break;
-	}
-
-	case CMD_MEM_INFO:
-	{
-		uint8_t buf[4];
-		buf[0] = SP;
-		buf[1] = 0xFF - SP;
-		buf[2] = 0;
-		buf[3] = 0;
-		send_data_response(CMD_MEM_INFO, STATUS_OK, buf, 4);
-		break;
-	}
-
-	case CMD_AUDIO_INFO:
-	{
-		uint8_t buf[4];
-		uint8_t i, active = 0;
-		for (i = 0; i < POLY_NUM; i++)
-		{
-			if (synthForAsm.SoundUnitUnionList[i].split.envelopeLevel > 0)
-				active++;
-		}
-		buf[0] = (uint8_t)(synthForAsm.mixOut);
-		buf[1] = (uint8_t)(synthForAsm.mixOut >> 8);
-		buf[2] = synthForAsm.lastSoundUnit;
-		buf[3] = active;
-		send_data_response(CMD_AUDIO_INFO, STATUS_OK, buf, 4);
-		break;
-	}
-
-	case CMD_ADC_READ:
-	{
-		if (pkt_len < 1)
-		{
-			send_response_err(CMD_ADC_READ, STATUS_BAD_LEN);
-			break;
-		}
-		uint16_t val = Get_ADCResult(pkt_data[0]);
-		uint8_t buf[2];
-		buf[0] = (uint8_t)(val >> 8);
-		buf[1] = (uint8_t)(val);
-		send_data_response(CMD_ADC_READ, STATUS_OK, buf, 2);
-		break;
-	}
-
-	case CMD_VOICE_DUMP:
-	{
-		uint8_t i, j, buf[104];
-		for (i = 0; i < POLY_NUM; i++)
-		{
-			SoundUnitSplit *su = &synthForAsm.SoundUnitUnionList[i].split;
-			j = i * 13;
-			buf[j + 0] = su->increment_frac;
-			buf[j + 1] = su->increment_int;
-			buf[j + 2] = su->wavetablePos_frac;
-			buf[j + 3] = (uint8_t)(su->wavetablePos_int);
-			buf[j + 4] = (uint8_t)(su->wavetablePos_int >> 8);
-			buf[j + 5] = su->envelopeLevel;
-			buf[j + 6] = (uint8_t)(su->val);
-			buf[j + 7] = (uint8_t)(su->val >> 8);
-			buf[j + 8] = (uint8_t)(su->sampleVal);
-			buf[j + 9] = voiceState[i].midiNote;
-			buf[j + 10] = voiceState[i].velocity;
-			buf[j + 11] = voiceState[i].envelopeState;
-			buf[j + 12] = voiceState[i].envelopeFrac;
-		}
-		send_data_response(CMD_VOICE_DUMP, STATUS_OK, buf, 104);
-		break;
-	}
-
-	case CMD_SYS_INFO:
-	{
-		MEM_XDATA(Player) *p = &mainPlayer;
-		uint32_t ms = GetSysMs();
-		uint8_t i, active = 0;
-		uint8_t buf[14];
-
-		for (i = 0; i < POLY_NUM; i++)
-		{
-			if (synthForAsm.SoundUnitUnionList[i].split.envelopeLevel > 0)
-				active++;
-		}
-
-		buf[0]  = (uint8_t)(ms);
-		buf[1]  = (uint8_t)(ms >> 8);
-		buf[2]  = (uint8_t)(ms >> 16);
-		buf[3]  = (uint8_t)(ms >> 24);
-
-		buf[4]  = storage_get_backend();
-		buf[5]  = (TR0 && ET0) ? 1 : 0;
-		buf[6]  = 0xFF - SP;
-		buf[7]  = active;
-
-		buf[8]  = (uint8_t)(synthForAsm.mixOut);
-		buf[9]  = (uint8_t)(synthForAsm.mixOut >> 8);
-
-		buf[10] = (uint8_t)p->scheduler.currentScoreIndex;
-		buf[11] = (uint8_t)p->scheduler.maxScoreNum;
-		buf[12] = (p->decoder.status == STATUS_DECODING) ? 1 : 0;
-		buf[13] = p->scheduler.schedulerMode;
-
-		send_data_response(CMD_SYS_INFO, STATUS_OK, buf, 14);
-		break;
-	}
-
-	case CMD_NOTE_ON:
-	{
-		uint8_t vel;
-		if (pkt_len < 1)
-		{
-			send_response_err(CMD_NOTE_ON, STATUS_BAD_LEN);
-			break;
-		}
-		vel = (pkt_len >= 2) ? pkt_data[1] : 127;
-		SynthNoteOn(pkt_data[0], vel);
-		send_response_ok(CMD_NOTE_ON);
-		break;
-	}
-
-	case CMD_NOTE_OFF:
-	{
-		if (pkt_len < 1)
-		{
-			send_response_err(CMD_NOTE_OFF, STATUS_BAD_LEN);
-			break;
-		}
-		SynthNoteOff(pkt_data[0]);
-		send_response_ok(CMD_NOTE_OFF);
-		break;
-	}
-
-	case CMD_FAST_NOTE_ON:
-	{
-		if (pkt_len < 1) break;
-		uint8_t vel = (pkt_len >= 2) ? pkt_data[1] : 127;
-		SynthNoteOn(pkt_data[0], vel);
-		break;
-	}
-
-	case CMD_FAST_NOTE_OFF:
-	{
-		if (pkt_len < 1) break;
-		SynthNoteOff(pkt_data[0]);
-		break;
-	}
-
-	case CMD_PANIC:
-		SynthPanic();
-		send_response_ok(CMD_PANIC);
-		break;
-
-	case CMD_PLAY:
-		PlayerPlay(&mainPlayer);
-		send_response_ok(CMD_PLAY);
-		break;
-
-	case CMD_STOP:
-		PlayerStop(&mainPlayer);
-		send_response_ok(CMD_STOP);
-		break;
-
-	case CMD_PREV:
-		PlaySchedulerPreviousScore(&mainPlayer);
-		send_response_ok(CMD_PREV);
-		break;
-
-	case CMD_NEXT:
-		PlaySchedulerNextScore(&mainPlayer);
-		send_response_ok(CMD_NEXT);
-		break;
-
-	case CMD_SET_SONG:
-		if (pkt_len < 1)
-		{
-			send_response_err(CMD_SET_SONG, STATUS_BAD_LEN);
-			break;
-		}
-		SchedulerPlaySong(&mainPlayer, (int32_t)(uint8_t)pkt_data[0]);
-		send_response_ok(CMD_SET_SONG);
-		break;
-
-	case CMD_GET_STATUS:
-	{
-		MEM_XDATA(Player) *p = &mainPlayer;
-		uint8_t buf[3];
-		buf[0] = (uint8_t)p->scheduler.currentScoreIndex;
-		buf[1] = (uint8_t)p->scheduler.maxScoreNum;
-		buf[2] = (p->decoder.status == STATUS_DECODING) ? 1 : 0;
-		send_data_response(CMD_GET_STATUS, STATUS_OK, buf, 3);
-		break;
-	}
-
-	case CMD_FLASH_INFO:
-	case CMD_FLASH_READ_ID:
-	case CMD_FLASH_READ:
-	case CMD_FLASH_ERASE:
-	case CMD_FLASH_ERASE_ALL:
-	case CMD_FLASH_WRITE:
-		if (storage_get_backend() != STORAGE_BACKEND_SPI)
-		{
-			flash_not_supported(pkt_cmd);
-			break;
-		}
-		if (pkt_cmd == CMD_FLASH_INFO)
-			cmd_flash_info();
-		else if (pkt_cmd == CMD_FLASH_READ_ID)
-			cmd_flash_read_id();
-		else if (pkt_cmd == CMD_FLASH_READ)
-			cmd_flash_read();
-		else if (pkt_cmd == CMD_FLASH_ERASE)
-			cmd_flash_erase();
-		else if (pkt_cmd == CMD_FLASH_ERASE_ALL)
-			cmd_flash_erase_all();
-		else if (pkt_cmd == CMD_FLASH_WRITE)
-			cmd_flash_write();
-		break;
-
-	case CMD_ADSR_GET:
-	{
-		uint8_t buf[11];
-		buf[0] = ADSR_ENV_MAX;
-		buf[1] = ADSR_TICK_MS;
-		write_u16_be(&buf[2], AdsrAttackRateFrac);
-		write_u16_be(&buf[4], AdsrDecayRateFrac);
-		buf[6] = ADSR_SUSTAIN_THRESHOLD;
-		write_u16_be(&buf[7], AdsrSustainDecayRateFrac);
-		write_u16_be(&buf[9], AdsrReleaseRateFrac);
-		send_data_response(CMD_ADSR_GET, STATUS_OK, buf, 11);
-		break;
-	}
-
-	case CMD_ADSR_SET:
-	{
-		uint16_t attack;
-		uint16_t decay;
-		uint16_t sustainDecay;
-		uint16_t release;
-
-		if (pkt_len != 11)
-		{
-			send_response_err(CMD_ADSR_SET, STATUS_BAD_LEN);
-			break;
-		}
-		if (pkt_data[0] != ADSR_ENV_MAX || pkt_data[1] != ADSR_TICK_MS
-		    || pkt_data[6] != ADSR_SUSTAIN_THRESHOLD)
-		{
-			send_response_err(CMD_ADSR_SET, STATUS_INVALID_PARAM);
-			break;
-		}
-		attack = read_u16_be(&pkt_data[2]);
-		decay = read_u16_be(&pkt_data[4]);
-		sustainDecay = read_u16_be(&pkt_data[7]);
-		release = read_u16_be(&pkt_data[9]);
-		if (attack < ADSR_RATE_MIN_PROGRESS || !adsr_rate_valid(attack, 0)
-		    || !adsr_rate_valid(decay, 0)
-		    || !adsr_rate_valid(sustainDecay, 1)
-		    || !adsr_rate_valid(release, 0))
-		{
-			send_response_err(CMD_ADSR_SET, STATUS_INVALID_PARAM);
-			break;
-		}
-		AdsrSetRates(attack, decay, sustainDecay, release);
-		send_response_ok(CMD_ADSR_SET);
-		break;
-	}
-
-	default:
-		send_response_err(pkt_cmd, STATUS_UNKNOWN_CMD);
-		break;
-	}
-}
-
-void Proto_ISR_Rx(uint8_t byte)
-{
-	proto_rx_put(byte);
-}
-
-void Proto_ISR_TxNextByte(void)
-{
-	if (tx_state == TX_SENDING)
-	{
-		if (tx_pos < tx_len)
-			SBUF = tx_buf[tx_pos++];
-		else
-			tx_state = TX_IDLE;
-	}
-}
-
-void Proto_Init(void)
-{
-	rx_wr  = 0;
-	rx_rd  = 0;
-	tx_len = 0;
-	tx_pos = 0;
-	tx_state = TX_IDLE;
-	reset_parser();
-}
-
-void Proto_Process(void)
-{
-	while (proto_rx_available())
-	{
-		uint8_t byte = proto_rx_get();
-		process_rx_byte(byte);
-	}
-}
+void Proto_ISR_Rx(uint8_t b) { uint8_t n=(rx_wr+1)&RX_MASK;if(n!=rx_rd){rx_ring[rx_wr]=b;rx_wr=n;} }
+void Proto_ISR_TxNextByte(void) { if(tx_state==TX_SENDING){if(tx_pos<tx_len)SBUF=tx_buf[tx_pos++];else tx_state=TX_IDLE;} }
+void Proto_Init(void) { rx_wr=rx_rd=0;tx_state=TX_IDLE;reset_parser(); }
+void Proto_Process(void) { while(rx_wr!=rx_rd){uint8_t b=rx_ring[rx_rd];rx_rd=(rx_rd+1)&RX_MASK;process_byte(b);} }
