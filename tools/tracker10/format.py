@@ -7,8 +7,16 @@ from dataclasses import dataclass
 RATE = 32000
 VOICES = 10
 TRACK_HEADER_SIZE = 48
-INSTRUMENT_SIZE = 40
+VERSION = 3
+INSTRUMENT_SIZE = 48
 PATTERN_DIR_SIZE = 8
+
+TRACK_LOOP = 0x01
+TRACK_AMIGA_EFFECTS = 0x02
+
+ENV_ENABLED = 0x01
+ENV_SUSTAIN = 0x02
+ENV_LOOP = 0x04
 
 CELL_NOTE = 0x01
 CELL_INSTRUMENT = 0x02
@@ -31,7 +39,12 @@ class Instrument:
     gain: int = 20
     relative_pitch: int = 0
     volume_macro: tuple[int, ...] = (32,)
-    volume_loop: int = 0
+    volume_step: int = 1
+    volume_flags: int = 0
+    volume_sustain: int = 0xFF
+    volume_loop_start: int = 0xFF
+    volume_loop_end: int = 0xFF
+    fadeout: int = 0
     pitch_macro: tuple[int, ...] = (0,)
     pitch_loop: int = 0
 
@@ -44,6 +57,7 @@ class Song:
     bpm: int
     patterns: tuple[tuple[tuple[Cell, ...], ...], ...]
     instruments: tuple[Instrument, ...]
+    amiga_effects: bool = False
 
 
 def _encode_cell(cell: Cell) -> bytes:
@@ -101,16 +115,30 @@ def _encode_instrument(instrument: Instrument) -> bytes:
         raise ValueError("volume macro value is outside 0..32")
     if any(not -128 <= x <= 127 for x in pitch):
         raise ValueError("pitch macro value is outside signed byte range")
-    if instrument.volume_loop != 0xFF and not 0 <= instrument.volume_loop < len(volume):
-        raise ValueError("invalid volume macro loop")
+    if not 1 <= instrument.volume_step <= 255 or instrument.volume_flags & ~0x07:
+        raise ValueError("invalid volume envelope timing or flags")
+    if instrument.volume_flags & ENV_SUSTAIN:
+        if not 0 <= instrument.volume_sustain < len(volume):
+            raise ValueError("invalid volume sustain point")
+    elif instrument.volume_sustain != 0xFF:
+        raise ValueError("disabled volume sustain must be 0xff")
+    if instrument.volume_flags & ENV_LOOP:
+        if not (0 <= instrument.volume_loop_start <= instrument.volume_loop_end < len(volume)):
+            raise ValueError("invalid volume envelope loop")
+    elif instrument.volume_loop_start != 0xFF or instrument.volume_loop_end != 0xFF:
+        raise ValueError("disabled volume loop points must be 0xff")
+    if not 0 <= instrument.fadeout <= 0xFFFF:
+        raise ValueError("invalid volume fadeout")
     if instrument.pitch_loop != 0xFF and not 0 <= instrument.pitch_loop < len(pitch):
         raise ValueError("invalid pitch macro loop")
     out = bytearray(INSTRUMENT_SIZE)
-    struct.pack_into("<BBhBBBB", out, 0, instrument.mode, instrument.gain,
-                     instrument.relative_pitch, len(volume), instrument.volume_loop,
-                     len(pitch), instrument.pitch_loop)
-    out[8:8 + len(volume)] = bytes(volume)
-    out[24:24 + len(pitch)] = bytes(x & 0xFF for x in pitch)
+    struct.pack_into("<BBhBBBBBBBBH", out, 0, instrument.mode, instrument.gain,
+                     instrument.relative_pitch, len(volume), instrument.volume_step,
+                     instrument.volume_flags, instrument.volume_sustain,
+                     instrument.volume_loop_start, instrument.volume_loop_end,
+                     len(pitch), instrument.pitch_loop, instrument.fadeout)
+    out[16:16 + len(volume)] = bytes(volume)
+    out[32:32 + len(pitch)] = bytes(x & 0xFF for x in pitch)
     return bytes(out)
 
 
@@ -148,7 +176,8 @@ def encode_track(song: Song, loop: bool = True) -> bytes:
     total_size = TRACK_HEADER_SIZE + len(body)
     header = struct.pack(
         "<4sBBBBI IHH IHH III HH I",
-        b"T10M", 2, VOICES, 1 if loop else 0, 0, RATE,
+        b"T10M", VERSION, VOICES,
+        (TRACK_LOOP if loop else 0) | (TRACK_AMIGA_EFFECTS if song.amiga_effects else 0), 0, RATE,
         orders_offset, len(song.orders), song.restart,
         pattern_dir_offset, len(song.patterns), len(song.instruments),
         instrument_dir_offset, total_size, zlib.crc32(body) & 0xFFFFFFFF,
@@ -167,11 +196,11 @@ def pack_playlist(tracks: list[bytes]) -> bytes:
     for track in tracks:
         entries += struct.pack("<II", offset, len(track))
         offset += len(track)
-    return struct.pack("<4sBBHII", b"T10P", 2, 0, len(tracks), offset, 0) + entries + b"".join(tracks)
+    return struct.pack("<4sBBHII", b"T10P", VERSION, 0, len(tracks), offset, 0) + entries + b"".join(tracks)
 
 
 def emit_c(image: bytes) -> str:
-    lines = ["/* Generated T10P v2 semantic tracker image. */", "#include <stdint.h>", "",
+    lines = [f"/* Generated T10P v{VERSION} semantic tracker image. */", "#include <stdint.h>", "",
              f"__code const unsigned char Score[{len(image)}] = {{"]
     for start in range(0, len(image), 12):
         lines.append("    " + ", ".join(f"0x{x:02X}" for x in image[start:start + 12]) + ",")
@@ -180,12 +209,14 @@ def emit_c(image: bytes) -> str:
 
 
 def inspect_track(track: bytes) -> dict[str, int]:
-    if len(track) < TRACK_HEADER_SIZE or track[:4] != b"T10M" or track[4] != 2 or track[5] != VOICES:
-        raise ValueError("invalid T10M v2 header")
+    if len(track) < TRACK_HEADER_SIZE or track[:4] != b"T10M" or track[4] != VERSION or track[5] != VOICES:
+        raise ValueError(f"invalid T10M v{VERSION} header")
     order_offset, order_count, restart = struct.unpack_from("<IHH", track, 12)
     pattern_dir_offset, pattern_count, instrument_count = struct.unpack_from("<IHH", track, 20)
     instrument_offset, total_size, expected_crc = struct.unpack_from("<III", track, 28)
     speed, bpm = struct.unpack_from("<HH", track, 40)
+    if track[6] & ~(TRACK_LOOP | TRACK_AMIGA_EFFECTS) or track[7] or track[44:48] != b"\0\0\0\0":
+        raise ValueError("invalid T10M flags or reserved bytes")
     if total_size != len(track) or zlib.crc32(track[TRACK_HEADER_SIZE:]) & 0xFFFFFFFF != expected_crc:
         raise ValueError("track size or CRC mismatch")
     if not order_count or order_offset + order_count > len(track) or restart >= order_count:
@@ -194,6 +225,30 @@ def inspect_track(track: bytes) -> dict[str, int]:
         raise ValueError("invalid pattern directory")
     if instrument_offset + instrument_count * INSTRUMENT_SIZE > len(track):
         raise ValueError("invalid instrument table")
+    for index in range(instrument_count):
+        offset = instrument_offset + index * INSTRUMENT_SIZE
+        (mode, gain, _relative, volume_len, volume_step, volume_flags,
+         sustain, loop_start, loop_end, pitch_len, pitch_loop,
+         _fadeout) = struct.unpack_from("<BBhBBBBBBBBH", track, offset)
+        if mode >= 8 or gain > 31 or not 1 <= volume_len <= 16 or not volume_step:
+            raise ValueError("invalid instrument header")
+        if volume_flags & ~0x07 or not 1 <= pitch_len <= 16:
+            raise ValueError("invalid instrument macro metadata")
+        if bool(volume_flags & ENV_SUSTAIN) != (sustain != 0xFF):
+            raise ValueError("invalid instrument sustain")
+        if sustain != 0xFF and sustain >= volume_len:
+            raise ValueError("invalid instrument sustain position")
+        if volume_flags & ENV_LOOP:
+            if not 0 <= loop_start <= loop_end < volume_len:
+                raise ValueError("invalid instrument envelope loop")
+        elif loop_start != 0xFF or loop_end != 0xFF:
+            raise ValueError("invalid disabled envelope loop")
+        if pitch_loop != 0xFF and pitch_loop >= pitch_len:
+            raise ValueError("invalid pitch macro loop")
+        if track[offset + 14:offset + 16] != b"\0\0":
+            raise ValueError("invalid instrument reserved bytes")
+        if any(value > 32 for value in track[offset + 16:offset + 16 + volume_len]):
+            raise ValueError("invalid volume macro value")
     orders = track[order_offset:order_offset + order_count]
     if any(x >= pattern_count for x in orders) or not speed or bpm < 32:
         raise ValueError("invalid song metadata")
@@ -242,13 +297,15 @@ def decode_track(track: bytes) -> Song:
     instruments = []
     for index in range(instrument_count):
         offset = instrument_offset + index * INSTRUMENT_SIZE
-        mode, gain, relative, volume_len, volume_loop, pitch_len, pitch_loop = struct.unpack_from(
-            "<BBhBBBB", track, offset)
-        volume = tuple(track[offset + 8:offset + 8 + volume_len])
+        (mode, gain, relative, volume_len, volume_step, volume_flags,
+         volume_sustain, volume_loop_start, volume_loop_end, pitch_len,
+         pitch_loop, fadeout) = struct.unpack_from("<BBhBBBBBBBBH", track, offset)
+        volume = tuple(track[offset + 16:offset + 16 + volume_len])
         pitch = tuple(x - 256 if x & 0x80 else x
-                      for x in track[offset + 24:offset + 24 + pitch_len])
-        instruments.append(Instrument(mode, gain, relative, volume, volume_loop,
-                                      pitch, pitch_loop))
+                      for x in track[offset + 32:offset + 32 + pitch_len])
+        instruments.append(Instrument(mode, gain, relative, volume, volume_step,
+                                      volume_flags, volume_sustain, volume_loop_start,
+                                      volume_loop_end, fadeout, pitch, pitch_loop))
     patterns = []
     for index in range(pattern_count):
         offset, size, rows = struct.unpack_from("<IHH", track, pattern_dir_offset + index * PATTERN_DIR_SIZE)
@@ -281,5 +338,6 @@ def decode_track(track: bytes) -> Song:
         if pos != offset + size:
             raise ValueError("pattern decode did not consume its range")
         patterns.append(tuple(pattern))
+    flags = track[6]
     return Song(tuple(track[order_offset:order_offset + order_count]), restart, speed, bpm,
-                tuple(patterns), tuple(instruments))
+                tuple(patterns), tuple(instruments), bool(flags & TRACK_AMIGA_EFFECTS))

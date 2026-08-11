@@ -43,7 +43,7 @@
 #define STATUS_INVALID_PARAM   0x07
 
 #define FW_VERSION_MAJOR  0
-#define FW_VERSION_MINOR  2
+#define FW_VERSION_MINOR  3
 
 #define PSTATE_IDLE     0
 #define PSTATE_CMD      1

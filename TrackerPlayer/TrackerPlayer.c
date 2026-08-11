@@ -6,13 +6,16 @@
 #define T10P_ENTRY_SIZE 8UL
 #define T10M_HEADER_SIZE 48UL
 #define T10_PATTERN_ENTRY_SIZE 8UL
-#define T10_INSTRUMENT_SIZE 40UL
+#define T10_INSTRUMENT_SIZE 48UL
 #define T10_SAMPLE_RATE 32000UL
 
 #define CELL_NOTE 0x01
 #define CELL_INSTRUMENT 0x02
 #define CELL_VOLUME 0x04
 #define CELL_EFFECT 0x08
+
+#define T10_TRACK_LOOP 0x01
+#define T10_TRACK_AMIGA_EFFECTS 0x02
 
 MEM_XDATA(TrackerControlQueue) trackerQueue;
 volatile uint8_t trackerLastError;
@@ -23,6 +26,17 @@ static MEM_XDATA(TrackerControlEvent) decodeEvent;
 static MEM_CODE(int8_t) vibratoSine[16] = {
       0,  49,  90, 117, 127, 117,  90,  49,
       0, -49, -90,-117,-127,-117, -90, -49
+};
+static MEM_CODE(uint8_t) amigaSlideScale[129] = {
+      1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
+      1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  2,  2,  2,  2,  2,
+      2,  2,  2,  2,  3,  3,  3,  3,  3,  3,  4,  4,  4,  4,  5,  5,
+      5,  5,  6,  6,  7,  7,  7,  8,  8,  9,  9, 10, 10, 11, 12, 12,
+     13, 14, 15, 16, 16, 17, 18, 20, 21, 22, 23, 25, 26, 28, 29, 31,
+     33, 35, 37, 39, 41, 44, 46, 49, 52, 55, 59, 62, 66, 70, 74, 78,
+     83, 88, 93, 99,104,111,117,124,132,139,148,156,166,176,186,197,
+    209,221,234,248,255,255,255,255,255,255,255,255,255,255,255,255,
+    255
 };
 
 static uint8_t queue_full(void)
@@ -69,7 +83,10 @@ static void default_instrument(MEM_XDATA(TrackerInstrumentState) *instrument)
     memset(instrument, 0, sizeof(*instrument));
     instrument->gain = 20;
     instrument->volumeLength = 1;
-    instrument->volumeLoop = 0;
+    instrument->volumeStep = 1;
+    instrument->volumeSustain = 0xFF;
+    instrument->volumeLoopStart = 0xFF;
+    instrument->volumeLoopEnd = 0xFF;
     instrument->pitchLength = 1;
     instrument->pitchLoop = 0;
     instrument->volumeMacro[0] = 32;
@@ -90,17 +107,29 @@ static uint8_t load_instrument(MEM_XDATA(TrackerVm) *vm, uint8_t number,
     instrument->gain = stream_u8(&vm->trackStream, offset + 1);
     instrument->relativePitch = (int16_t)stream_u16(&vm->trackStream, offset + 2);
     instrument->volumeLength = stream_u8(&vm->trackStream, offset + 4);
-    instrument->volumeLoop = stream_u8(&vm->trackStream, offset + 5);
-    instrument->pitchLength = stream_u8(&vm->trackStream, offset + 6);
-    instrument->pitchLoop = stream_u8(&vm->trackStream, offset + 7);
+    instrument->volumeStep = stream_u8(&vm->trackStream, offset + 5);
+    instrument->volumeFlags = stream_u8(&vm->trackStream, offset + 6);
+    instrument->volumeSustain = stream_u8(&vm->trackStream, offset + 7);
+    instrument->volumeLoopStart = stream_u8(&vm->trackStream, offset + 8);
+    instrument->volumeLoopEnd = stream_u8(&vm->trackStream, offset + 9);
+    instrument->pitchLength = stream_u8(&vm->trackStream, offset + 10);
+    instrument->pitchLoop = stream_u8(&vm->trackStream, offset + 11);
+    instrument->fadeout = stream_u16(&vm->trackStream, offset + 12);
     if (instrument->mode >= WT_WAVE_COUNT || instrument->gain > 31
-     || !instrument->volumeLength || instrument->volumeLength > TRACKER_MACRO_LENGTH
+     || !instrument->volumeLength || instrument->volumeLength > TRACKER_MACRO_LENGTH || !instrument->volumeStep
      || !instrument->pitchLength || instrument->pitchLength > TRACKER_MACRO_LENGTH
-     || (instrument->volumeLoop != 0xFF && instrument->volumeLoop >= instrument->volumeLength)
+     || (instrument->volumeFlags & 0xF8)
+     || ((instrument->volumeFlags & TRACKER_ENV_SUSTAIN)
+         ? instrument->volumeSustain >= instrument->volumeLength : instrument->volumeSustain != 0xFF)
+     || ((instrument->volumeFlags & TRACKER_ENV_LOOP)
+         ? (instrument->volumeLoopStart > instrument->volumeLoopEnd
+            || instrument->volumeLoopEnd >= instrument->volumeLength)
+         : (instrument->volumeLoopStart != 0xFF || instrument->volumeLoopEnd != 0xFF))
+     || stream_u16(&vm->trackStream, offset + 14)
      || (instrument->pitchLoop != 0xFF && instrument->pitchLoop >= instrument->pitchLength)) return 0;
     for (i = 0; i < TRACKER_MACRO_LENGTH; i++) {
-        instrument->volumeMacro[i] = stream_u8(&vm->trackStream, offset + 8 + i);
-        instrument->pitchMacro[i] = (int8_t)stream_u8(&vm->trackStream, offset + 24 + i);
+        instrument->volumeMacro[i] = stream_u8(&vm->trackStream, offset + 16 + i);
+        instrument->pitchMacro[i] = (int8_t)stream_u8(&vm->trackStream, offset + 32 + i);
         if (instrument->volumeMacro[i] > 32) return 0;
     }
     return 1;
@@ -190,6 +219,8 @@ static uint8_t decode_row(MEM_XDATA(TrackerVm) *vm)
         if (instrument) {
             if (!load_instrument(vm, instrument, &channel->definition)) { trackerLastError = 0x88; return 0; }
             channel->instrument = instrument;
+            channel->volumePosition = channel->volumeTick = channel->pitchPosition = 0;
+            channel->fadeout = 0xFFFF;
         }
         if (mask & CELL_VOLUME) channel->volume = volume;
         if (effect == 0x0F && parameter) {
@@ -197,15 +228,17 @@ static uint8_t decode_row(MEM_XDATA(TrackerVm) *vm)
             else vm->bpm = parameter;
         }
         if (note == 97) {
-            channel->gate = 0;
+            channel->keyOn = 0;
+            if (!(channel->definition.volumeFlags & TRACKER_ENV_ENABLED)) channel->gate = 0;
         } else if (note) {
             uint16_t pitch = (uint16_t)(note + 11) << 8;
             if (effect == 3 && channel->gate) {
                 channel->target = pitch;
             } else {
                 channel->note = channel->target = pitch;
-                channel->gate = 1;
-                channel->volumePosition = channel->pitchPosition = 0;
+                channel->keyOn = channel->gate = 1;
+                channel->volumePosition = channel->volumeTick = channel->pitchPosition = 0;
+                channel->fadeout = 0xFFFF;
                 channel->volume = (mask & CELL_VOLUME) ? volume : 64;
                 vm->pendingReset |= bit;
             }
@@ -217,7 +250,10 @@ static uint8_t decode_row(MEM_XDATA(TrackerVm) *vm)
 static void retrigger_channel(MEM_XDATA(TrackerVm) *vm, uint8_t index)
 {
     vm->channel[index].volumePosition = 0;
+    vm->channel[index].volumeTick = 0;
     vm->channel[index].pitchPosition = 0;
+    vm->channel[index].fadeout = 0xFFFF;
+    vm->channel[index].keyOn = 1;
     vm->pendingReset |= (uint16_t)1 << index;
 }
 
@@ -228,21 +264,27 @@ static void apply_tick_effects(MEM_XDATA(TrackerVm) *vm)
     static MEM_XDATA(uint8_t) down;
     static MEM_XDATA(uint8_t) interval;
     static MEM_XDATA(uint16_t) step;
+    static MEM_XDATA(uint8_t) noteIndex;
     static TrackerChannelState __xdata * __xdata channel;
     if (!vm->tick) return;
     for (i = 0; i < WT_VOICE_COUNT; i++) {
         channel = &vm->channel[i];
+        if (channel->effect >= 1 && channel->effect <= 3) {
+            step = (uint16_t)channel->parameter << 4;
+            if (vm->amigaEffects) {
+                noteIndex = (uint8_t)(channel->note >> 8);
+                if (noteIndex > 128) noteIndex = 128;
+                step = (uint16_t)channel->parameter * amigaSlideScale[noteIndex];
+            }
+        }
         switch (channel->effect) {
         case 1:
-            step = (uint16_t)channel->parameter << 4;
             channel->note = channel->note > 0xFFFFU - step ? 0xFFFFU : channel->note + step;
             break;
         case 2:
-            step = (uint16_t)channel->parameter << 4;
             channel->note = channel->note > step ? channel->note - step : 1;
             break;
         case 3:
-            step = (uint16_t)channel->parameter << 4;
             if (channel->note < channel->target)
                 channel->note = channel->target - channel->note < step ? channel->target : channel->note + step;
             else if (channel->note > channel->target)
@@ -270,7 +312,10 @@ static uint16_t output_pitch(MEM_XDATA(TrackerVm) *vm, uint8_t index)
 {
     static TrackerChannelState __xdata * __xdata channel;
     static MEM_XDATA(int32_t) pitch;
+    static MEM_XDATA(int16_t) vibrato;
+    static MEM_XDATA(uint16_t) amplitude;
     static MEM_XDATA(uint8_t) position;
+    static MEM_XDATA(uint8_t) noteIndex;
     channel = &vm->channel[index];
     pitch = (int32_t)channel->note + channel->definition.relativePitch;
     position = channel->pitchPosition;
@@ -281,8 +326,17 @@ static uint16_t output_pitch(MEM_XDATA(TrackerVm) *vm, uint8_t index)
                       : vm->tick % 3 == 2 ? channel->parameter & 15 : 0;
         pitch += (uint16_t)shift << 8;
     } else if (channel->effect == 4 && channel->gate) {
-        int16_t vibrato = (int16_t)vibratoSine[channel->vibratoPhase >> 2] * channel->vibratoDepth;
-        pitch += vibrato >> 4;
+        if (vm->amigaEffects) {
+            noteIndex = (uint8_t)(channel->note >> 8);
+            if (noteIndex > 128) noteIndex = 128;
+            amplitude = ((uint16_t)amigaSlideScale[noteIndex] * channel->vibratoDepth + 1) >> 1;
+            vibrato = (int16_t)vibratoSine[channel->vibratoPhase >> 2]
+                    * (int16_t)((amplitude + 4) >> 3);
+            pitch += vibrato >> 4;
+        } else {
+            vibrato = (int16_t)vibratoSine[channel->vibratoPhase >> 2] * channel->vibratoDepth;
+            pitch += vibrato >> 4;
+        }
     }
     if (pitch < 1) return 1;
     if (pitch > 0xFFFFL) return 0xFFFF;
@@ -293,6 +347,23 @@ static void advance_macro(uint8_t *position, uint8_t length, uint8_t loop)
 {
     if ((uint8_t)(*position + 1) < length) (*position)++;
     else if (loop != 0xFF) *position = loop;
+}
+
+static void advance_volume_envelope(MEM_XDATA(TrackerChannelState) *channel)
+{
+    MEM_XDATA(TrackerInstrumentState) *instrument = &channel->definition;
+    uint8_t next;
+    if (!(instrument->volumeFlags & TRACKER_ENV_ENABLED)) return;
+    if (channel->keyOn && (instrument->volumeFlags & TRACKER_ENV_SUSTAIN)
+     && channel->volumePosition == instrument->volumeSustain) return;
+    channel->volumeTick++;
+    if (channel->volumeTick < instrument->volumeStep) return;
+    channel->volumeTick = 0;
+    next = channel->volumePosition + 1;
+    if ((instrument->volumeFlags & TRACKER_ENV_LOOP) && next > instrument->volumeLoopEnd)
+        channel->volumePosition = instrument->volumeLoopStart;
+    else if (next < instrument->volumeLength)
+        channel->volumePosition = next;
 }
 
 static uint16_t next_tick_samples(MEM_XDATA(TrackerVm) *vm)
@@ -352,6 +423,9 @@ static uint8_t vm_next_event(MEM_XDATA(TrackerVm) *vm, MEM_XDATA(TrackerControlE
         if (channel->gate) {
             uint16_t level = ((uint16_t)channel->volume * channel->definition.gain + 32U) >> 6;
             control.volume = (uint8_t)((level * channel->definition.volumeMacro[volumePosition] + 16U) >> 5);
+            if (!channel->keyOn)
+                control.volume = (uint8_t)(((uint16_t)control.volume
+                                  * ((channel->fadeout >> 8) + 1U)) >> 8);
         } else control.volume = 0;
         if (control.volume > 31) control.volume = 31;
         control.waveOffset = channel->definition.mode << 4;
@@ -360,10 +434,16 @@ static uint8_t vm_next_event(MEM_XDATA(TrackerVm) *vm, MEM_XDATA(TrackerControlE
             event->voice[i] = control;
             event->changedMask |= bit;
         }
-        advance_macro(&channel->volumePosition, channel->definition.volumeLength,
-                      channel->definition.volumeLoop);
+        advance_volume_envelope(channel);
         advance_macro(&channel->pitchPosition, channel->definition.pitchLength,
                       channel->definition.pitchLoop);
+        if (!channel->keyOn && (channel->definition.volumeFlags & TRACKER_ENV_ENABLED)
+         && channel->definition.fadeout) {
+            if (channel->fadeout <= channel->definition.fadeout) {
+                channel->fadeout = 0;
+                channel->gate = 0;
+            } else channel->fadeout -= channel->definition.fadeout;
+        }
     }
     event->resetMask = vm->pendingReset;
     vm->pendingReset = 0;
@@ -388,9 +468,10 @@ static uint8_t open_track(MEM_XDATA(TrackerPlayer) *player, uint16_t index)
     vm->trackSize = size;
     if (stream_u8(&vm->trackStream, 0) != 'T' || stream_u8(&vm->trackStream, 1) != '1'
      || stream_u8(&vm->trackStream, 2) != '0' || stream_u8(&vm->trackStream, 3) != 'M'
-     || stream_u8(&vm->trackStream, 4) != 2 || stream_u8(&vm->trackStream, 5) != WT_VOICE_COUNT
+     || stream_u8(&vm->trackStream, 4) != 3 || stream_u8(&vm->trackStream, 5) != WT_VOICE_COUNT
      || stream_u32(&vm->trackStream, 8) != T10_SAMPLE_RATE) return 0;
-    vm->loop = stream_u8(&vm->trackStream, 6) & 1;
+    vm->loop = stream_u8(&vm->trackStream, 6) & T10_TRACK_LOOP;
+    vm->amigaEffects = !!(stream_u8(&vm->trackStream, 6) & T10_TRACK_AMIGA_EFFECTS);
     vm->orderCount = stream_u16(&vm->trackStream, 16);
     vm->restartOrder = stream_u16(&vm->trackStream, 18);
     vm->patternDirectoryOffset = stream_u32(&vm->trackStream, 20);
@@ -412,7 +493,7 @@ static uint8_t open_track(MEM_XDATA(TrackerPlayer) *player, uint16_t index)
         if (totalSize != size || !vm->orderCount || vm->orderCount > 256
          || vm->restartOrder >= vm->orderCount || !vm->instrumentCount
          || vm->instrumentCount > 255 || vm->bpm < 32 || vm->bpm > 999
-         || (stream_u8(&vm->trackStream, 6) & 0xFE) || stream_u8(&vm->trackStream, 7)
+         || (stream_u8(&vm->trackStream, 6) & 0xFC) || stream_u8(&vm->trackStream, 7)
          || stream_u32(&vm->trackStream, 44)
          || orderOffset > size || vm->orderCount > size - orderOffset
          || vm->patternDirectoryOffset > size || patternBytes > size - vm->patternDirectoryOffset
@@ -448,7 +529,7 @@ uint8_t TrackerPlayerStart(MEM_XDATA(TrackerPlayer) *player, uint8_t mode)
      || stream_u8(&player->scheduler.playlistStream, 1) != '1'
      || stream_u8(&player->scheduler.playlistStream, 2) != '0'
      || stream_u8(&player->scheduler.playlistStream, 3) != 'P'
-     || stream_u8(&player->scheduler.playlistStream, 4) != 2) {
+     || stream_u8(&player->scheduler.playlistStream, 4) != 3) {
         trackerLastError = 0x10;
         player->vm.status = TRACKER_ERROR;
         return 0;

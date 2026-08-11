@@ -1,8 +1,8 @@
-# T10 v2 Semantic Score Format
+# T10 v3 Semantic Score Format
 
 ## 1. Scope and byte order
 
-T10 v2 is the device format for Tracker10. It stores tracker-level musical
+T10 v3 is the device format for Tracker10. It stores tracker-level musical
 semantics, not MIDI messages, PCM timestamps, NES register writes, or expanded
 32 kHz oscillator states. All multibyte integers are unsigned little-endian
 unless a field is explicitly described as signed. All offsets inside a T10M
@@ -15,7 +15,7 @@ The format has two layers:
   instruments.
 
 Unknown versions must be rejected. Reserved fields and bits are written as zero
-and ignored by a v2 reader only where this document explicitly permits it.
+and ignored by a v3 reader only where this document explicitly permits it.
 
 ## 2. T10P playlist
 
@@ -26,8 +26,8 @@ The playlist header is 16 bytes.
 | Offset | Size | Field | Constraint |
 |---:|---:|---|---|
 | 0 | 4 | magic | ASCII `T10P` |
-| 4 | 1 | version | `2` |
-| 5 | 1 | flags | `0` in v2 |
+| 4 | 1 | version | `3` |
+| 5 | 1 | flags | `0` in v3 |
 | 6 | 2 | track count | `1..65535` |
 | 8 | 4 | total image size | Includes header, directory and all tracks |
 | 12 | 4 | reserved | Written as zero |
@@ -46,14 +46,14 @@ body CRC and all container ranges are validated before a track is opened.
 
 ## 3. T10M header
 
-The T10M v2 header is exactly 48 bytes.
+The T10M v3 header is exactly 48 bytes.
 
 | Offset | Size | Field | Constraint or meaning |
 |---:|---:|---|---|
 | 0 | 4 | magic | ASCII `T10M` |
-| 4 | 1 | version | `2` |
+| 4 | 1 | version | `3` |
 | 5 | 1 | physical voices | `10` |
-| 6 | 1 | flags | Bit 0: loop at end; bits 1..7: zero |
+| 6 | 1 | flags | Bit 0: loop; bit 1: Amiga-period effects; bits 2..7: zero |
 | 7 | 1 | reserved | Zero |
 | 8 | 4 | output sample rate | `32000` |
 | 12 | 4 | order table offset | Usually 48 |
@@ -134,7 +134,7 @@ previous musical state.
 
 ## 5. Compiled instruments
 
-Each instrument record is exactly 40 bytes. It is intentionally fixed-size so a
+Each instrument record is exactly 48 bytes. It is intentionally fixed-size so a
 complete active instrument can be copied to XRAM with one bounded operation;
 the 32 kHz ISR never reads score storage.
 
@@ -144,16 +144,34 @@ the 32 kHz ISR never reads score storage.
 | 1 | 1 | gain, `0..31` |
 | 2 | 2 | signed relative pitch, Q8.8 semitones |
 | 4 | 1 | volume macro length, `1..16` |
-| 5 | 1 | volume loop index or `0xFF` |
-| 6 | 1 | pitch macro length, `1..16` |
-| 7 | 1 | pitch loop index or `0xFF` |
-| 8 | 16 | volume macro storage |
-| 24 | 16 | signed pitch macro storage |
+| 5 | 1 | volume step duration in tracker ticks, `1..255` |
+| 6 | 1 | volume flags: bit 0 enabled, bit 1 sustain, bit 2 loop |
+| 7 | 1 | volume sustain position or `0xFF` |
+| 8 | 1 | volume loop-start position or `0xFF` |
+| 9 | 1 | volume loop-end position or `0xFF` |
+| 10 | 1 | pitch macro length, `1..16` |
+| 11 | 1 | pitch loop index or `0xFF` |
+| 12 | 2 | key-off fadeout decrement per tracker tick |
+| 14 | 2 | reserved, zero |
+| 16 | 16 | volume macro storage |
+| 32 | 16 | signed pitch macro storage |
 
-Unused macro bytes are zero. A loop index must be less than its macro length.
-`0xFF` means advance to the final element and hold it. A one-shot volume macro
-therefore ends in zero and uses loop `0xFF`; a sustained constant macro contains
-one value and loops at zero.
+Unused macro bytes are zero. A pitch loop index must be less than its macro
+length; `0xFF` means advance to the final element and hold it. Disabled volume
+sustain and loop positions must be `0xFF`. Enabled loop positions satisfy
+`start <= end < length`.
+
+The volume position advances only after `volume step duration` tracker ticks.
+While key-on is true it holds at the sustain position. After key-off, sustain is
+released and the position continues. An enabled loop moves from loop end back to
+loop start both before and after key-off. Fadeout, rather than disabling the
+envelope loop, eventually silences a released voice.
+
+Fadeout state starts at `65535`. On every released tracker tick the instrument
+fadeout value is subtracted with saturation at zero. Output volume is additionally
+scaled by this state. Fadeout is evaluated only when the volume-envelope enabled
+flag is set. Key-off immediately silences an instrument with no enabled volume
+envelope, matching the source tracker rule.
 
 Volume macro entries are `0..32`. Runtime output volume is evaluated in two
 rounded 16-bit stages to avoid overflow on the 8051:
@@ -191,8 +209,9 @@ once per output sample regardless of how many voices select it. Voice count and
 channel order therefore cannot alter noise pitch or sequence.
 
 Macros are evaluated at tracker-tick rate. Tick 0 reads element zero; positions
-advance after the tick output has been produced. A normal note retriggers both
-macros and requests an oscillator phase reset. Tone portamento does neither.
+advance after the tick output has been produced. A normal note resets envelope,
+fadeout and pitch-macro state and requests an oscillator phase reset. Tone
+portamento does none of those. An instrument command resets its envelope state.
 
 ## 6. Tracker VM semantics
 
@@ -204,8 +223,8 @@ strict sequence:
 3. On ticks greater than zero, advance continuous effects.
 4. Evaluate arpeggio, vibrato and instrument pitch macro without mutating the
    underlying note except where the effect itself is a slide.
-5. Evaluate volume macro and produce changed DDS voice controls.
-6. Advance macro cursors.
+5. Evaluate volume envelope, release fadeout and produce changed DDS controls.
+6. Advance envelope and pitch-macro cursors, then update fadeout.
 7. Calculate the exact wait to the next tracker tick and enqueue the control.
 
 Tick duration uses an integer remainder accumulator:
@@ -224,8 +243,8 @@ rounding drift. Speed controls ticks per row and does not enter this calculation
 | Effect | Semantics | Parameter memory |
 |---:|---|---|
 | `0xy` | Arpeggio: base, +x, +y semitones | No |
-| `1xx` | Pitch slide up, `xx/16` semitone per nonzero tick | Yes |
-| `2xx` | Pitch slide down, `xx/16` semitone per nonzero tick | Yes |
+| `1xx` | Pitch slide up, linear or Amiga-period scaled | Yes |
+| `2xx` | Pitch slide down, linear or Amiga-period scaled | Yes |
 | `3xx` | Tone portamento to note target | Yes |
 | `4xy` | Sine vibrato speed x, depth y | Nibble-wise |
 | `Axy` | Volume slide; up wins when x is nonzero | Yes |
@@ -236,6 +255,13 @@ Effect movement begins on tick 1. A zero parameter for effects with memory reuse
 the previous nonzero value. `400` therefore continues both remembered vibrato
 speed and depth. Panning effect `8xx` and volume-column `Cx` are deliberately
 discarded by the host because the hardware output is mono.
+
+When header flag bit 1 is clear, slide parameters use `xx/16` semitone per
+nonzero tick and vibrato depth uses the normalized linear model. When bit 1 is
+set, the main-thread VM uses a code-memory scale table indexed by the current
+Q8.8 note. It converts source period deltas into note deltas for `1xx`, `2xx`,
+`3xx`, and `4xy`. This preserves the note-dependent strength of Amiga-period
+effects without carrying periods, logarithms or division into the ISR.
 
 Any other source effect currently causes compilation to fail with its pattern,
 row and channel location. Silent approximation is forbidden. Future frontends
@@ -268,5 +294,8 @@ version. New source frontends do not require a format version when they lower to
 the existing normalized effects and instrument modes. Reserved fields are not a
 license to change behavior without versioning.
 
-T10M v1 was the sample-timed oscillator event stream. It is intentionally not
-accepted by the v2 firmware; the host compiler is the migration boundary.
+T10M v1 was the sample-timed oscillator event stream. T10M v2 introduced orders,
+patterns and 40-byte fixed macro instruments. T10M v3 replaces those instruments
+with 48-byte timed envelope records and adds the Amiga-period effect flag. The v3
+firmware intentionally rejects both older versions; the host compiler is the
+migration boundary.

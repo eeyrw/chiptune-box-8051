@@ -2,7 +2,9 @@ import struct
 
 import pytest
 
-from tools.tracker10.format import Cell, Instrument, Song, decode_track, encode_track, inspect_track, pack_playlist
+from tools.tracker10.format import (ENV_ENABLED, ENV_SUSTAIN, Cell, Instrument,
+                                    Song, decode_track, encode_track,
+                                    inspect_track, pack_playlist)
 from tools.tracker10.reference import ReferencePlayer
 from tools.tracker10.xm import XmError, compile_xm, parse_xm
 
@@ -15,7 +17,7 @@ def simple_song() -> Song:
     second[0] = Cell(effect=4, parameter=0)
     pattern = (tuple(first), tuple(second), empty)
     instrument = Instrument(mode=1, gain=24, relative_pitch=-32,
-                            volume_macro=(32, 20, 0), volume_loop=0xFF,
+                            volume_macro=(32, 20, 0), volume_flags=ENV_ENABLED,
                             pitch_macro=(8, 0), pitch_loop=0xFF)
     return Song((0, 0, 0), 1, 3, 125, (pattern,), (instrument,))
 
@@ -24,8 +26,8 @@ def test_semantic_track_playlist_and_crc():
     track = encode_track(simple_song())
     image = pack_playlist([track])
     info = inspect_track(track)
-    assert track[:6] == b"T10M\x02\x0a"
-    assert image[:5] == b"T10P\x02"
+    assert track[:6] == b"T10M\x03\x0a"
+    assert image[:5] == b"T10P\x03"
     assert info == {"orders": 3, "patterns": 1, "instruments": 1,
                     "cells": 2, "nonempty_rows": 2, "track_bytes": len(track)}
     assert decode_track(track) == simple_song()
@@ -81,6 +83,11 @@ def minimal_xm(effect: int = 0, parameter: int = 0) -> bytes:
     sample_header[13] = 0x40
     sample_header[14] = 1
     sample_header[16] = 12
+    struct.pack_into("<HHHHHH", instrument, 129, 0, 64, 6, 64, 30, 0)
+    instrument[225] = 3
+    instrument[227] = 1
+    instrument[233] = 3
+    struct.pack_into("<H", instrument, 239, 256)
     sample = bytes((20, 20, 20, 20, 236, 236, 236, 236,
                     20, 20, 20, 20, 236, 236, 236, 236))
     return bytes(header + pattern + instrument + sample_header + sample)
@@ -93,7 +100,12 @@ def test_xm_instrument_and_pattern_are_preserved_semantically():
     assert module.instruments[0].samples[0].loop_length == 16
     assert module.instruments[0].samples[0].finetune == 64
     assert module.instruments[0].samples[0].relative_note == 12
-    assert decode_track(track).instruments[0].relative_pitch == 0
+    compiled = decode_track(track).instruments[0]
+    assert compiled.relative_pitch == 0
+    assert compiled.volume_flags == ENV_ENABLED | ENV_SUSTAIN
+    assert compiled.volume_step == 2
+    assert compiled.volume_sustain == 3
+    assert compiled.fadeout == 256
     assert info["orders"] == 1
     assert info["patterns"] == 1
     assert inspect_track(track)["cells"] == 1
@@ -113,3 +125,31 @@ def test_reference_vm_keeps_vibrato_parameter_memory():
     assert not frames[3].voices[0].reset
     assert frames[4].voices[0].pitch != frames[3].voices[0].pitch
     assert sum(x.wait_samples for x in frames) == 3840
+
+
+def test_keyoff_releases_envelope_instead_of_cutting_immediately():
+    empty = (Cell(),) * 10
+    rows = []
+    for cell in (Cell(note=49, instrument=1), Cell(note=97), Cell(), Cell()):
+        row = list(empty)
+        row[0] = cell
+        rows.append(tuple(row))
+    instrument = Instrument(gain=20, volume_flags=ENV_ENABLED | ENV_SUSTAIN,
+                            volume_sustain=0, fadeout=32768)
+    song = Song((0,), 0, 1, 125, (tuple(rows),), (instrument,))
+    player = ReferencePlayer(song)
+    frames = [player.step() for _ in range(4)]
+    assert frames[0].voices[0].volume > 0
+    assert frames[1].voices[0].volume > 0
+    assert frames[2].voices[0].volume > 0
+    assert frames[3].voices[0].volume == 0
+
+
+def test_amiga_effect_scaling_is_note_dependent():
+    empty = (Cell(),) * 10
+    row = list(empty)
+    row[0] = Cell(note=49, instrument=1, effect=2, parameter=1)
+    song = Song((0,), 0, 2, 125, ((tuple(row),),), (Instrument(),), True)
+    player = ReferencePlayer(song)
+    first, second = player.step(), player.step()
+    assert first.voices[0].pitch - second.voices[0].pitch == 10

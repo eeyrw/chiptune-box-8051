@@ -15,6 +15,9 @@
 #define TRACKER_MODE_LIST_ONCE 1
 #define TRACKER_MODE_SINGLE 2
 #define TRACKER_MACRO_LENGTH 16
+#define TRACKER_ENV_ENABLED 0x01
+#define TRACKER_ENV_SUSTAIN 0x02
+#define TRACKER_ENV_LOOP 0x04
 
 typedef struct _TrackerVoiceControl {
     uint8_t increment[3];
@@ -43,9 +46,14 @@ typedef struct _TrackerInstrumentState {
     uint8_t gain;
     int16_t relativePitch;
     uint8_t volumeLength;
-    uint8_t volumeLoop;
+    uint8_t volumeStep;
+    uint8_t volumeFlags;
+    uint8_t volumeSustain;
+    uint8_t volumeLoopStart;
+    uint8_t volumeLoopEnd;
     uint8_t pitchLength;
     uint8_t pitchLoop;
+    uint16_t fadeout;
     uint8_t volumeMacro[TRACKER_MACRO_LENGTH];
     int8_t pitchMacro[TRACKER_MACRO_LENGTH];
 } TrackerInstrumentState;
@@ -65,8 +73,11 @@ typedef struct _TrackerChannelState {
     uint8_t volumeSlide;
     uint8_t vibratoPhase;
     uint8_t volumePosition;
+    uint8_t volumeTick;
     uint8_t pitchPosition;
+    uint8_t keyOn;
     uint8_t gate;
+    uint16_t fadeout;
     TrackerInstrumentState definition;
 } TrackerChannelState;
 
@@ -91,6 +102,7 @@ typedef struct _TrackerVm {
     uint8_t speed;
     uint8_t tick;
     uint8_t loop;
+    uint8_t amigaEffects;
     uint8_t pendingEnd;
     uint8_t status;
 } TrackerVm;

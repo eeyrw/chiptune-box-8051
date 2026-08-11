@@ -10,7 +10,7 @@ from tracker10.xm import compile_xm, parse_xm
 
 
 def main() -> int:
-    p=argparse.ArgumentParser(description="Compile FastTracker II XM into semantic T10M v2/T10P data")
+    p=argparse.ArgumentParser(description="Compile FastTracker II XM into semantic T10M v3/T10P data")
     p.add_argument("command",choices=("compile",))
     p.add_argument("input",type=Path)
     p.add_argument("output",type=Path)

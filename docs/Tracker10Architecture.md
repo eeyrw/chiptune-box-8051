@@ -4,7 +4,7 @@
 
 Tracker10 is a generic ten-channel 8-bit wavetable tracker player for the
 STC8H3K64S2. It is not an NES, APU, VRC, MIDI or DPCM emulator. Source modules
-are compiled offline to T10P/T10M v2; the MCU never parses XM structures or
+are compiled offline to T10P/T10M v3; the MCU never parses XM structures or
 sample data.
 
 The design preserves high-level tracker structure instead of expanding a song
@@ -21,13 +21,13 @@ XM bytes
   -> mono lowering and explicit unsupported-effect validation
   -> sample/instrument analysis
   -> pattern/order compaction and fixed instrument macros
-  -> T10M v2 + CRC32
+  -> T10M v3 + CRC32
   -> T10P playlist or generated scoreList.c
 ```
 
 The parser reads XM instrument headers, keymaps, volume envelopes, sample
-headers, 8/16-bit delta-coded samples, loops, default gain, finetune and relative
-note. Current lowering maps the keymap entry around the middle tracker octave to
+headers, 8/16-bit delta-coded samples, loops, default gain, finetune, relative
+note, sustain/loop points and fadeout. Current lowering maps the keymap entry around the middle tracker octave to
 one device instrument. A future compiler pass may split multisample key zones
 into several deduplicated T10 instruments and rewrite note cells; no MCU format
 change is required.
@@ -45,6 +45,12 @@ high-frequency derivative energy. Tonal percussion receives a falling pitch
 macro; noisy percussion selects one of two noise modes. RMS windows produce a
 bounded 16-step volume macro. This is a deterministic compiler transform, not a
 hardcoded channel or source-instrument-number mapping.
+
+Long source envelopes are uniformly resampled across their complete time span.
+The compiled step duration preserves envelopes longer than 16 ticks, and mapped
+sustain/loop positions plus 16-bit fadeout preserve key-off release behavior.
+The XM frequency-table flag is retained only as normalized effect-model metadata:
+the MCU still stores pitch as Q8.8 notes and never parses XM periods.
 
 ## Runtime split
 
@@ -78,8 +84,8 @@ high for the complete ISR and is the hardware timing point.
 
 There are ten fixed source/runtime channels and no MCU voice allocator. Each
 channel retains note and portamento target, volume, current effect, remembered
-effect parameters, vibrato phase, instrument definition and two macro cursors.
-An active 40-byte instrument record is copied from score storage to XRAM, so
+effect parameters, vibrato phase, key-on/release state, fadeout, instrument
+definition and macro cursors. An active 48-byte instrument record is copied from score storage to XRAM, so
 macro evaluation never thrashes the SPI cache.
 
 At roughly 50 tracker ticks per second, the VM produces a `TrackerControlEvent`.
@@ -115,8 +121,9 @@ noise rate or sequence.
 
 Each lane performs mute/volume tests, oscillator selection, signed sample by
 unsigned volume multiplication, 24-bit accumulation and phase advance. The
-final sum is shifted by four, saturated to signed 8-bit and biased by 128 for
-PWM. Muting suppresses mixing but continues phase advance.
+final sum is shifted by eight, giving ten simultaneously loud voices shared
+headroom, then saturated to signed 8-bit and biased by 128 for PWM. Muting
+suppresses mixing but continues phase advance.
 
 ## Memory and current build
 
@@ -125,11 +132,11 @@ build uses:
 
 | Resource | Used | Available |
 |---|---:|---:|
-| code Flash | 41,771 bytes | 65,536 bytes |
-| XRAM | 2,483 bytes | 3,072 bytes |
+| code Flash | 43,811 bytes | 65,536 bytes |
+| XRAM | 2,590 bytes | 3,072 bytes |
 | absolute DATA hot state | 90 bytes | fixed at `0x21` |
 | stack | 133 bytes | starts at `0x7B` |
-| T10P score image | 18,998 bytes | stored in code Flash or SPI |
+| T10P score image | 19,174 bytes | stored in code Flash or SPI |
 
 The SPI backend retains a 1 KiB XRAM read cache. The current PCB crosses the SPI
 data lines, so `SpiFlash.c` bit-bangs P3.2 clock, P3.3 MOSI, P3.4 MISO and P3.5
@@ -138,9 +145,9 @@ chip select. Hardware SPI must not be enabled without a board wiring change.
 ## Timing and quality verification
 
 `tools/tracker10/reference.py` is the host semantic reference for row/tick,
-effect-memory, macro and timing behavior. Format tests cover structural
-round-trip, CRC corruption, pattern reuse, instrument parsing and explicit
-rejection of unsupported effects.
+effect-memory, envelope/release, Amiga scaling and timing behavior. Format tests
+cover structural round-trip, CRC corruption, pattern reuse, instrument parsing
+and explicit rejection of unsupported effects.
 
 CRC32 is generated and verified by the host tools. The 8051 deliberately does
 not scan the complete score at boot to calculate it; device reads remain guarded
@@ -163,8 +170,26 @@ listening also exposed and verified the fix for source-sample tuning metadata:
 copying XM `relative note` into a normalized oscillator had transposed individual
 instruments by as much as 17 semitones.
 
+The T10 v3 envelope/effect build was subsequently checked for 14 seconds across
+multiple patterns. Firmware and format reported version 3, parser error remained
+zero, queue depth remained four, underruns remained zero, and the audio-derived
+clock advanced 14.119 seconds over 14.070 seconds of host wall time. The added
+release/fadeout and Amiga-effect work therefore remains outside the 32 kHz ISR
+and does not exhaust the producer queue.
+
+After changing the ten-voice mix scaling from `sum >> 4` to `sum >> 8`, 500
+live UART snapshots covered a signed mix range of -54 through +56 and a PWM
+range of 74 through 184. No snapshot reached the signed saturation threshold or
+either PWM rail, and the queue underrun counter remained zero. This is the
+baseline gain for listening tests; louder output belongs in the analog stage or
+in an explicitly measured limiter, not in unchecked digital gain.
+
 Generated or downloaded music used for listening tests must have clear
 redistribution permission before it is retained in a public repository. The
 source XM for the current local Funky Stars conversion is intentionally absent.
+The locally fetched verification file has SHA-256
+`2b7ce3c9efa7bb94067c1c7b00ed8b43433120f2ac2992903b09afd3d33739e3`;
+this identifies the exact source used to regenerate `scoreList.c` without
+redistributing that source in the repository.
 
 The complete byte-level contract is in [T10Format.md](T10Format.md).

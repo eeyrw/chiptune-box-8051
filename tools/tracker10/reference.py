@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .format import Instrument, Song, VOICES
+import math
+
+from .format import ENV_ENABLED, ENV_LOOP, ENV_SUSTAIN, Instrument, Song, VOICES
 
 
 @dataclass(frozen=True)
@@ -39,11 +41,17 @@ class Channel:
     vibrato_phase: int = 0
     volume_position: int = 0
     pitch_position: int = 0
+    volume_tick: int = 0
+    fadeout: int = 0xFFFF
+    key_on: bool = False
     gate: bool = False
     reset: bool = False
 
 
 SINE = (0, 49, 90, 117, 127, 117, 90, 49, 0, -49, -90, -117, -127, -117, -90, -49)
+AMIGA_SLIDE_SCALE = tuple(min(255, max(1, round(
+    48 * 256 / (math.log(2) * (1712.0 * 2 ** ((60 - note) / 12)))
+))) for note in range(129))
 
 
 class ReferencePlayer:
@@ -86,6 +94,8 @@ class ReferencePlayer:
             self._remember(channel)
             if cell.instrument:
                 channel.instrument = self.song.instruments[cell.instrument - 1]
+                channel.volume_position = channel.pitch_position = channel.volume_tick = 0
+                channel.fadeout = 0xFFFF
             if cell.volume:
                 channel.volume = cell.volume - 1
             if cell.effect == 0x0F and cell.parameter:
@@ -94,15 +104,18 @@ class ReferencePlayer:
                 else:
                     self.bpm = cell.parameter
             if cell.note == 97:
-                channel.gate = False
+                channel.key_on = False
+                if not channel.instrument.volume_flags & ENV_ENABLED:
+                    channel.gate = False
             elif cell.note:
                 pitch = (cell.note + 11) << 8
                 if cell.effect == 3 and channel.gate:
                     channel.target = pitch
                 else:
                     channel.note = channel.target = pitch
-                    channel.gate = True
-                    channel.volume_position = channel.pitch_position = 0
+                    channel.key_on = channel.gate = True
+                    channel.volume_position = channel.pitch_position = channel.volume_tick = 0
+                    channel.fadeout = 0xFFFF
                     channel.volume = cell.volume - 1 if cell.volume else 64
                     channel.reset = True
 
@@ -111,6 +124,8 @@ class ReferencePlayer:
             return
         for channel in self.channels:
             step = channel.parameter << 4
+            if self.song.amiga_effects:
+                step = channel.parameter * AMIGA_SLIDE_SCALE[min(128, channel.note >> 8)]
             if channel.effect == 1:
                 channel.note = min(0xFFFF, channel.note + step)
             elif channel.effect == 2:
@@ -137,6 +152,25 @@ class ReferencePlayer:
             return position + 1
         return loop if loop != 0xFF else position
 
+    @staticmethod
+    def _advance_volume(channel: Channel) -> None:
+        instrument = channel.instrument
+        if not instrument.volume_flags & ENV_ENABLED:
+            return
+        if (channel.key_on and instrument.volume_flags & ENV_SUSTAIN
+                and channel.volume_position == instrument.volume_sustain):
+            return
+        channel.volume_tick += 1
+        if channel.volume_tick < instrument.volume_step:
+            return
+        channel.volume_tick = 0
+        position = channel.volume_position + 1
+        if (instrument.volume_flags & ENV_LOOP
+                and position > instrument.volume_loop_end):
+            channel.volume_position = instrument.volume_loop_start
+        elif position < len(instrument.volume_macro):
+            channel.volume_position = position
+
     def step(self) -> TickFrame:
         frame_order, frame_row, frame_tick = self.order, self.row, self.tick
         if not self.tick:
@@ -151,16 +185,26 @@ class ReferencePlayer:
                 shift = (0, channel.parameter >> 4, channel.parameter & 15)[self.tick % 3]
                 pitch += shift << 8
             elif channel.effect == 4 and channel.gate:
-                pitch += SINE[channel.vibrato_phase >> 2] * channel.vibrato_depth // 16
+                if self.song.amiga_effects:
+                    scale = AMIGA_SLIDE_SCALE[min(128, channel.note >> 8)]
+                    amplitude = (scale * channel.vibrato_depth + 1) // 2
+                    pitch += SINE[channel.vibrato_phase >> 2] * ((amplitude + 4) >> 3) >> 4
+                else:
+                    pitch += SINE[channel.vibrato_phase >> 2] * channel.vibrato_depth // 16
             level = (channel.volume * instrument.gain + 32) >> 6
             volume = (level * instrument.volume_macro[channel.volume_position] + 16) >> 5
+            if not channel.key_on:
+                volume = volume * channel.fadeout >> 16
             voices.append(VoiceFrame(max(1, min(0xFFFF, pitch)), min(31, volume) if channel.gate else 0,
                                      instrument.mode, channel.reset))
             channel.reset = False
-            channel.volume_position = self._advance(channel.volume_position, len(instrument.volume_macro),
-                                                    instrument.volume_loop)
+            self._advance_volume(channel)
             channel.pitch_position = self._advance(channel.pitch_position, len(instrument.pitch_macro),
                                                    instrument.pitch_loop)
+            if not channel.key_on and instrument.volume_flags & ENV_ENABLED:
+                channel.fadeout = max(0, channel.fadeout - instrument.fadeout)
+                if not channel.fadeout:
+                    channel.gate = False
         numerator = self.remainder + 80000
         wait = numerator // self.bpm
         self.remainder = numerator - wait * self.bpm

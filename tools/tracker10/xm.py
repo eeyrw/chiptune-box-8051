@@ -4,7 +4,8 @@ import math
 import struct
 from dataclasses import dataclass
 
-from .format import Cell, Instrument, Song, encode_track
+from .format import (ENV_ENABLED, ENV_LOOP, ENV_SUSTAIN, Cell, Instrument,
+                     Song, encode_track)
 
 
 class XmError(ValueError):
@@ -33,6 +34,7 @@ class XmInstrument:
     volume_loop_start: int
     volume_loop_end: int
     volume_type: int
+    volume_fadeout: int
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,7 @@ class XmModule:
     bpm: int
     patterns: tuple[tuple[tuple[Cell, ...], ...], ...]
     instruments: tuple[XmInstrument, ...]
+    linear_frequency: bool
 
 
 def _text(value: bytes) -> str:
@@ -76,7 +79,7 @@ def parse_xm(data: bytes) -> XmModule:
     header_size = u32(60)
     song_length, restart = u16(64), u16(66)
     channel_count, pattern_count, instrument_count = u16(68), u16(70), u16(72)
-    speed, bpm = u16(76), u16(78)
+    flags, speed, bpm = u16(74), u16(76), u16(78)
     if not 1 <= song_length <= 256 or not 1 <= channel_count <= 64 or not speed or not bpm:
         raise XmError("invalid XM header")
     orders = tuple(data[80:80 + song_length])
@@ -131,7 +134,7 @@ def parse_xm(data: bytes) -> XmModule:
             raise XmError("invalid XM instrument header")
         keymap: tuple[int, ...] = ()
         volume_points: tuple[tuple[int, int], ...] = ()
-        sustain = loop_start = loop_end = volume_type = 0
+        sustain = loop_start = loop_end = volume_type = fadeout = 0
         sample_header_size = 0
         if sample_count:
             if header_length < 243:
@@ -145,6 +148,7 @@ def parse_xm(data: bytes) -> XmModule:
                                   for i in range(point_count))
             sustain, loop_start, loop_end = data[start + 227:start + 230]
             volume_type = data[start + 233]
+            fadeout = u16(start + 239)
 
         sample_headers = start + header_length
         sample_data = sample_headers + sample_count * sample_header_size
@@ -171,12 +175,12 @@ def parse_xm(data: bytes) -> XmModule:
         cursor = raw_cursor
         instruments.append(XmInstrument(
             _text(data[start + 4:start + 26]), keymap, tuple(samples), volume_points,
-            sustain, loop_start, loop_end, volume_type,
+            sustain, loop_start, loop_end, volume_type, fadeout,
         ))
     if cursor != len(data):
         raise XmError("trailing data after XM instruments")
     return XmModule(_text(data[17:37]), orders, min(restart, song_length - 1),
-                    channel_count, speed, bpm, tuple(patterns), tuple(instruments))
+                    channel_count, speed, bpm, tuple(patterns), tuple(instruments), bool(flags & 1))
 
 
 _WAVES = (
@@ -234,13 +238,16 @@ def _sample_envelope(sample: XmSample) -> tuple[int, ...]:
     return result[:16]
 
 
-def _xm_envelope(instrument: XmInstrument) -> tuple[tuple[int, ...], int]:
+def _xm_envelope(instrument: XmInstrument) -> tuple[tuple[int, ...], int, int, int, int, int]:
     if not instrument.volume_type & 1 or not instrument.volume_points:
-        return (32,), 0
+        return (32,), 1, 0, 0xFF, 0xFF, 0xFF
     points = instrument.volume_points
-    last_tick = min(15, points[-1][0])
+    last_tick = points[-1][0]
+    step = max(1, (last_tick + 14) // 15)
+    count = min(16, (last_tick + step - 1) // step + 1)
     values = []
-    for tick in range(last_tick + 1):
+    for index in range(count):
+        tick = min(last_tick, index * step)
         left = points[0]
         right = points[-1]
         for candidate in points[1:]:
@@ -253,12 +260,19 @@ def _xm_envelope(instrument: XmInstrument) -> tuple[tuple[int, ...], int]:
         else:
             level = left[1] + (right[1] - left[1]) * (tick - left[0]) / (right[0] - left[0])
         values.append(max(0, min(32, round(level / 2))))
-    loop = 0xFF
-    if instrument.volume_type & 4 and instrument.volume_loop_start < len(points):
-        loop = min(15, points[instrument.volume_loop_start][0])
-    elif instrument.volume_type & 2 and instrument.volume_sustain < len(points):
-        loop = min(15, points[instrument.volume_sustain][0])
-    return tuple(values) or (32,), loop
+    def position(point_index: int) -> int:
+        tick = points[min(point_index, len(points) - 1)][0]
+        return min(len(values) - 1, (tick + step // 2) // step)
+    flags = ENV_ENABLED
+    sustain = loop_start = loop_end = 0xFF
+    if instrument.volume_type & 2:
+        flags |= ENV_SUSTAIN
+        sustain = position(instrument.volume_sustain)
+    if instrument.volume_type & 4:
+        flags |= ENV_LOOP
+        loop_start = position(instrument.volume_loop_start)
+        loop_end = position(instrument.volume_loop_end)
+    return tuple(values) or (32,), step, flags, sustain, loop_start, loop_end
 
 
 def _compile_instrument(instrument: XmInstrument) -> Instrument:
@@ -272,8 +286,11 @@ def _compile_instrument(instrument: XmInstrument) -> Instrument:
     relative_pitch = 0
     gain = max(1, min(31, round(sample.volume * 31 / 64)))
     if sample.loop_type and sample.loop_length >= 8:
-        volume, volume_loop = _xm_envelope(instrument)
-        return Instrument(_match_wave(sample), gain, relative_pitch, volume, volume_loop, (0,), 0)
+        volume, step, flags, sustain, loop_start, loop_end = _xm_envelope(instrument)
+        return Instrument(mode=_match_wave(sample), gain=gain, relative_pitch=relative_pitch,
+                          volume_macro=volume, volume_step=step, volume_flags=flags,
+                          volume_sustain=sustain, volume_loop_start=loop_start,
+                          volume_loop_end=loop_end, fadeout=instrument.volume_fadeout)
 
     if len(sample.values) > 256:
         rms = math.sqrt(sum(x * x for x in sample.values) / len(sample.values)) or 1.0
@@ -287,8 +304,10 @@ def _compile_instrument(instrument: XmInstrument) -> Instrument:
             mode = 3
         volume = _sample_envelope(sample)
         pitch = (96, 64, 40, 24, 12, 4, 0) if mode == 3 else (0,)
-        return Instrument(mode, gain, relative_pitch, volume, 0xFF, pitch, 0xFF)
-    return Instrument(_match_wave(sample), gain, relative_pitch, (32,), 0, (0,), 0)
+        return Instrument(mode=mode, gain=gain, relative_pitch=relative_pitch,
+                          volume_macro=volume, volume_flags=ENV_ENABLED,
+                          pitch_macro=pitch, pitch_loop=0xFF)
+    return Instrument(mode=_match_wave(sample), gain=gain, relative_pitch=relative_pitch)
 
 
 def _normalize_cell(cell: Cell, pattern: int, row: int, channel: int) -> Cell:
@@ -334,7 +353,8 @@ def compile_xm(module: XmModule, max_orders: int | None = None) -> tuple[bytes, 
     if max_orders is None or max_orders > module.restart:
         restart = min(module.restart, order_count - 1)
     song = Song(tuple(pattern_map[x] for x in selected_orders), restart, module.speed, module.bpm,
-                tuple(patterns), tuple(_compile_instrument(x) for x in module.instruments))
+                tuple(patterns), tuple(_compile_instrument(x) for x in module.instruments),
+                amiga_effects=not module.linear_frequency)
     track = encode_track(song, loop=max_orders is None)
     cells = sum(1 for pattern in patterns for row in pattern for cell in row if cell != Cell())
     return track, {

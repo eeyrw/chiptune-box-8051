@@ -133,34 +133,11 @@ wt_phase'Idx'$:
     mov (pVoice + WT_PHASE_2),a
 .endm
 
-    ; Signed 24-bit sum >> 4, saturated to signed 8-bit, then biased for PWM.
+    ; Signed 24-bit sum >> 8 gives ten full-scale voices shared headroom.
+    ; Saturate the remaining rare extreme before biasing to unsigned PWM.
     mov a,r6
     mov r5,a
     mov a,r7
-    mov r6,a
-    mov a,r5
-    add a,r5
-    mov r5,a
-    mov a,r6
-    addc a,r6
-    mov r6,a
-    mov a,r5
-    add a,r5
-    mov r5,a
-    mov a,r6
-    addc a,r6
-    mov r6,a
-    mov a,r5
-    add a,r5
-    mov r5,a
-    mov a,r6
-    addc a,r6
-    mov r6,a
-    mov a,r5
-    add a,r5
-    mov r5,a
-    mov a,r6
-    addc a,r6
     mov r6,a
     mov (WT_SYNTH_ABS_ADDR + WT_MIX_OFFSET),r5
     mov (WT_SYNTH_ABS_ADDR + WT_MIX_OFFSET + 1),r6

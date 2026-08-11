@@ -93,7 +93,7 @@ static void dispatch(void)
     PlatformIrqState irq;
     switch(pkt_cmd) {
     case CMD_PING: {
-        const char *s="TRACKER10-8051 v0.1";
+        const char *s="TRACKER10-8051 v0.3";
         for(i=0;s[i];i++) data[i]=(uint8_t)s[i];
         respond(pkt_cmd,STATUS_OK,data,i); break;
     }
@@ -137,7 +137,7 @@ static void dispatch(void)
         data[8]=mainPlayer.vm.tick; data[9]=mainPlayer.vm.speed;
         respond(pkt_cmd,STATUS_OK,data,10); break;
     case CMD_FORMAT_INFO:
-        data[0]='T';data[1]='1';data[2]='0';data[3]='M';data[4]=2;data[5]=WT_VOICE_COUNT;data[6]=0x00;data[7]=0x7d;
+        data[0]='T';data[1]='1';data[2]='0';data[3]='M';data[4]=3;data[5]=WT_VOICE_COUNT;data[6]=0x00;data[7]=0x7d;
         respond(pkt_cmd,STATUS_OK,data,8); break;
     case CMD_CHANNEL_MUTE:
         if(pkt_len!=2 || (pkt_data[1]&0xfc)) error(pkt_cmd,STATUS_INVALID_PARAM);
