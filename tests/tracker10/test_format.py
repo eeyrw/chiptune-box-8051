@@ -6,7 +6,8 @@ from tools.tracker10.format import (ENV_ENABLED, ENV_SUSTAIN, MODE_PCM_BASE,
                                     Cell, Instrument, PcmSample, Song, decode_track, encode_track,
                                     inspect_track, pack_playlist)
 from tools.tracker10.reference import ReferencePlayer
-from tools.tracker10.xm import XmError, _instrument_note_counts, compile_xm, parse_xm
+from tools.tracker10.xm import (XmError, XmSample, _instrument_note_counts,
+                               _pcm_sample, compile_xm, parse_xm)
 
 
 def simple_song() -> Song:
@@ -88,6 +89,16 @@ def test_reference_preserves_same_sample_simultaneous_pcm_triggers():
                 (Instrument(mode=MODE_PCM_BASE, gain=31),),
                 pcm_samples=(PcmSample(bytes((0, 1, 2))),))
     assert ReferencePlayer(song).step().pcm_triggers == ((0, 31), (0, 31))
+
+
+def test_pcm_one_shot_fades_to_zero_without_changing_length():
+    sample = XmSample("tail", (64,) * 64, 0, 0, 64, 0, 0, 0)
+    pcm = _pcm_sample(sample, 49).data
+    signed = tuple(value - 256 if value & 0x80 else value for value in pcm)
+    assert len(pcm) == 62
+    assert signed[-32] == 64
+    assert signed[-1] == 0
+    assert all(left >= right >= 0 for left, right in zip(signed[-32:], signed[-31:]))
 
 
 def minimal_xm(effect: int = 0, parameter: int = 0) -> bytes:

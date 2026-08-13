@@ -159,7 +159,9 @@ An eight-byte directory entry follows for every PCM sample:
 PCM data follows the directory. Samples are signed, mono, eight-bit, 8 kHz and
 one-shot. The compiler resamples XM percussion offline using the sample's
 relative note and finetune at its most frequently triggered source note. The
-MCU therefore performs neither rate conversion nor interpolation.
+final 32 samples receive a 4 ms linear fade to zero, preventing a non-zero final
+sample from clicking when its fixed voice becomes silent. The MCU therefore
+performs neither rate conversion, interpolation nor end-of-sample fading.
 
 Both resource types are deliberately internal-Code-Flash-only in v4. The ISR
 uses `MOVC` directly and never performs SPI I/O, buffer filling or audio

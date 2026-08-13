@@ -258,6 +258,17 @@ def _pcm_sample(sample: XmSample, note: int) -> PcmSample:
         value = round(sample.values[left] * (1.0 - fraction) + sample.values[right] * fraction)
         output.append(max(-128, min(127, value)) & 0xFF)
         position += source_step
+    # A one-shot ending away from zero clicks when the fixed voice becomes
+    # silent. Smooth only the last 4 ms offline; the MCU keeps a branch-free
+    # end-of-sample transition and the encoded length does not change.
+    fade = min(32, len(output))
+    if fade:
+        divisor = max(1, fade - 1)
+        for index in range(fade):
+            position = len(output) - fade + index
+            value = output[position]
+            value = value - 256 if value & 0x80 else value
+            output[position] = (round(value * (fade - 1 - index) / divisor)) & 0xFF
     return PcmSample(bytes(output or (0,)))
 
 

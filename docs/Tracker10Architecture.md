@@ -146,6 +146,11 @@ every lane continues at exactly 8 kHz. The staggering prevents multiple drum
 lanes from synchronizing all Code Flash fetch and cursor-update work into every
 fourth ISR.
 
+The XM frontend applies a 32-sample (4 ms at 8 kHz) linear tail fade to every
+PCM one-shot. This guarantees a zero-valued final sample and removes the abrupt
+one-shot-to-silence discontinuity without adding per-voice release state or work
+to the renderer.
+
 Each lane performs mute/volume tests, oscillator selection, signed sample by
 unsigned volume multiplication, 24-bit accumulation and phase advance. The
 final sum is shifted by eight, giving ten simultaneously loud voices shared
