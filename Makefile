@@ -27,8 +27,8 @@ ARCH = mcs51
 MODEL  = large
 # ------------------------------------------------------
 # Memory Layout
-# PRG Size = 64K Bytes
-CODE_SIZE = --code-loc 0x0000 --code-size 65536
+# STC option program_eeprom_split=65024 leaves 63.5 KiB for program code.
+CODE_SIZE = --code-loc 0x0000 --code-size 65024
 # INT-MEM Size = 256 Bytes
 IRAM_SIZE = --idata-loc 0x0000  --iram-size 256
 # EXT-MEM Size = 3K Bytes
@@ -100,12 +100,13 @@ all: $(OBJECTS) $(PROJECT_NAME).ihx $(PROJECT_NAME).hex $(PROJECT_NAME).bin
 
 TRACKER_INPUT ?=
 TRACKER_OUTPUT ?= output.t10p
+TRACKER_C_OUTPUT ?= scoreList.c
 
 host-test:
 	@$(PYTHON) -m pytest -q tests/tracker10
 
 compile-tracker:
-	@$(PYTHON) tools/tracker10_tool.py compile "$(TRACKER_INPUT)" "$(TRACKER_OUTPUT)"
+	@$(PYTHON) tools/tracker10_tool.py compile "$(TRACKER_INPUT)" "$(TRACKER_OUTPUT)" --c-output "$(TRACKER_C_OUTPUT)"
 
 generate-builtin-score:
 	@$(PYTHON) tools/gen_builtin_demo.py

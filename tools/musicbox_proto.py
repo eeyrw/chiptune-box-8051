@@ -133,7 +133,7 @@ class Tracker10Client:
         values = struct.unpack("BBBBBBBB", data[:8])
         mix = struct.unpack("<h", bytes(values[:2]))[0]
         state = values[6] | values[7] << 8
-        muted = state & 0x03FF
+        muted = state & 0x07FF
         print(f"Mix/PWM:    {mix:+d} / {values[2]}")
         print(f"Muted:      {muted:#05x}")
         level = (values[5] - values[4]) & 0xFF
@@ -150,8 +150,8 @@ class Tracker10Client:
         print(f"Channels:   {channels}")
 
     def mute(self, mask: int) -> None:
-        if not 0 <= mask <= 0x3FF:
-            raise ValueError("mute mask must be in range 0x000..0x3ff")
+        if not 0 <= mask <= 0x7FF:
+            raise ValueError("mute mask must be in range 0x000..0x7ff")
         self.command(CMD_CHANNEL_MUTE, struct.pack("<H", mask))
         print(f"Mute mask: {mask:#05x}")
 

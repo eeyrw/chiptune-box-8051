@@ -5,7 +5,7 @@ import zlib
 from dataclasses import dataclass
 
 RATE = 32000
-PCM_RATE = 8000
+PCM_RATE = 16000
 VOICES = 10
 TRACK_HEADER_SIZE = 48
 VERSION = 4
@@ -247,6 +247,29 @@ def pack_playlist(tracks: list[bytes]) -> bytes:
         entries += struct.pack("<II", offset, len(track))
         offset += len(track)
     return struct.pack("<4sBBHII", b"T10P", VERSION, 0, len(tracks), offset, 0) + entries + b"".join(tracks)
+
+
+def inspect_playlist(image: bytes) -> dict:
+    if len(image) < 16:
+        raise ValueError("truncated T10P header")
+    magic, version, reserved, track_count, total_size, reserved2 = struct.unpack_from("<4sBBHII", image)
+    if magic != b"T10P" or version != VERSION or reserved or reserved2 or not track_count:
+        raise ValueError(f"invalid T10P v{VERSION} header")
+    directory_end = 16 + track_count * 8
+    if directory_end > len(image) or total_size != len(image):
+        raise ValueError("invalid T10P size or directory")
+    tracks = []
+    ranges = []
+    for index in range(track_count):
+        offset, length = struct.unpack_from("<II", image, 16 + index * 8)
+        if offset < directory_end or not length or offset > len(image) or length > len(image) - offset:
+            raise ValueError(f"invalid T10P track {index} range")
+        tracks.append(inspect_track(image[offset:offset + length]))
+        ranges.append((offset, offset + length, index))
+    for left, right in zip(sorted(ranges), sorted(ranges)[1:]):
+        if left[1] > right[0]:
+            raise ValueError(f"T10P tracks {left[2]} and {right[2]} overlap")
+    return {"playlist_bytes": len(image), "track_count": track_count, "tracks": tracks}
 
 
 def emit_c(image: bytes) -> str:

@@ -42,7 +42,7 @@ void WavetableSynthSilence(void)
 
 void WavetableSynthSetMuteMask(uint16_t mask)
 {
-    wavetableSynth.muteMask = (wavetableSynth.muteMask & 0xC000) | (mask & 0x03FF);
+    wavetableSynth.muteMask = (wavetableSynth.muteMask & 0xC000) | (mask & 0x07FF);
 }
 
 void AudioBufferInit(void)

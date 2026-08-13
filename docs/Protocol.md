@@ -25,10 +25,12 @@ UART1 使用 115200 baud。请求帧为：
 | `07` | VOICE_DUMP | 10 x 8-byte hot voice state |
 | `10..15` | PLAY/STOP/PREV/NEXT/SET/STATUS | playback control |
 | `17` | FORMAT_INFO | `T10M`, version `4`, channel count, rate |
-| `18` | CHANNEL_MUTE | u16 LE, bits 0..9 |
+| `18` | CHANNEL_MUTE | u16 LE, bits 0..9 are voices; bit 10 mutes PCM mixing only |
 | `20..25` | FLASH commands | optional SPI NOR management |
 
-The AUDIO_INFO state word uses bits 0..9 as the mute mask. Bit 14 latches final
+The AUDIO_INFO state word uses bits 0..9 as the voice mute mask and bit 10 as a
+PCM-only diagnostic mix mute. PCM state and timing continue while bit 10 is set.
+Bit 14 latches final
 mixer saturation and bit 15 latches a Timer0 ISR that crossed the next 32 kHz
 deadline. Reading AUDIO_INFO clears both diagnostic bits; they do not affect
 channel muting.

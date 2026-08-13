@@ -47,8 +47,9 @@ chip waveforms instead of reducing every source to a small built-in palette.
 
 Long non-looped samples are treated as one-shot percussion. The host selects the
 instrument's most frequent trigger note, applies XM relative-note and finetune
-calibration, and linearly resamples to signed 8 kHz PCM. No PCM decoding, rate
-conversion or interpolation remains for the MCU.
+calibration, and uses a 16-tap windowed-sinc low-pass resampler to produce signed
+16 kHz PCM. No PCM decoding, rate conversion or interpolation remains for the
+MCU.
 
 Long source envelopes are uniformly resampled across their complete time span.
 The compiled step duration preserves envelopes longer than 16 ticks, and mapped
@@ -120,7 +121,7 @@ Each fixed voice occupies eight absolute DATA bytes:
 |---:|---|
 | 0..2 | 24-bit DDS phase, or PCM cursor low/mid and remaining low |
 | 3..5 | 24-bit DDS increment, or PCM remaining high, cached sample and hold counter |
-| 6 | volume `0..31`; bit 7 selects PCM and bit 6 requests cache priming |
+| 6 | tonal volume `0..127`; for PCM, bit 7 selects PCM, bit 6 requests cache priming, and bits 0..4 carry gain |
 | 7 | prepacked wavetable ID (`ID << 4`), or unused in PCM mode |
 
 Ten voices consume 80 bytes. The remaining absolute state is `mixOut` (2), PWM
@@ -130,8 +131,8 @@ two current signed noise samples (2). The complete block is 90 bytes at DATA
 leaving 133 bytes.
 
 Tonal voices use signed 16-sample tables from the active song's internal Code
-Flash resource bank. PCM voices read signed 8 kHz one-shots from the same image
-with `MOVC`; each fetched byte is cached and emitted for exactly four 32 kHz
+Flash resource bank. PCM voices read signed 16 kHz one-shots from the same image
+with `MOVC`; each fetched byte is cached and emitted for exactly two 32 kHz
 interrupts. Because a tracker channel
 owns its PCM state, all ten fixed voices may play PCM without allocation or new
 hot-state bytes. The PCM lane applies a fixed 1.5x transient gain before the shared
@@ -140,21 +141,25 @@ noise selectors consume shared long-period and short-period LFSR samples. Both L
 outside the voice expansion, so enabling a second drum voice cannot change the
 noise rate or sequence.
 
-PCM trigger priming is staggered by fixed channel index modulo four. This adds
-at most three 32 kHz frames (93.75 microseconds) of one-time onset offset, then
-every lane continues at exactly 8 kHz. The staggering prevents multiple drum
-lanes from synchronizing all Code Flash fetch and cursor-update work into every
-fourth ISR.
+PCM trigger priming is staggered by fixed channel index modulo two. This adds at
+most one 32 kHz frame (31.25 microseconds) of one-time onset offset, then every
+lane continues at exactly 16 kHz. The staggering prevents multiple drum lanes
+from synchronizing all Code Flash fetch and cursor-update work into every second
+rendered frame.
 
-The XM frontend applies a 32-sample (4 ms at 8 kHz) linear tail fade to every
-PCM one-shot. This guarantees a zero-valued final sample and removes the abrupt
-one-shot-to-silence discontinuity without adding per-voice release state or work
-to the renderer.
+The XM frontend removes PCM DC offset while retaining the source dynamic range;
+it does not normalize unrelated percussion toward a common loudness. It then
+applies a 64-sample (4 ms at 16 kHz) linear tail fade to every PCM one-shot. The
+fade guarantees a zero-valued final sample and removes the abrupt one-shot-to-
+silence discontinuity without adding per-voice release state or renderer work.
 
 Each lane performs mute/volume tests, oscillator selection, signed sample by
 unsigned volume multiplication, 24-bit accumulation and phase advance. The
-final sum is shifted by eight, giving ten simultaneously loud voices shared
-headroom, then saturated to signed 8-bit and biased by 128 for PWM. Muting
+final sum is shifted by ten, giving ten simultaneously loud voices shared
+headroom, then saturated to signed 8-bit and biased by 128 for PWM. Tonal lanes
+retain 7-bit gain; this is the same full-scale
+gain as the earlier 5-bit gain with a shift by 8, but preserves two extra bits
+for quiet source volumes and envelopes. Muting
 suppresses mixing but continues phase advance.
 
 ## Memory and current build
@@ -164,11 +169,11 @@ build uses:
 
 | Resource | Used | Available |
 |---|---:|---:|
-| program Flash | 53,318 bytes | 65,024-byte programmed region |
+| program Flash | 58,699 bytes | 65,024-byte programmed region |
 | XRAM | 2,871 bytes | 3,072 bytes |
 | absolute DATA hot state | 90 bytes | fixed at `0x21` |
 | stack | 133 bytes | starts at `0x7B` |
-| T10P score image | 24,599 bytes | internal Code Flash |
+| T10P score image | 29,779 bytes | internal Code Flash |
 
 The SPI backend remains compiled and retains a 1 KiB XRAM read cache. T10M v4
 audio resources are internal-Code-Flash-only and opening v4 from SPI is rejected.
@@ -211,9 +216,10 @@ clock advanced 14.119 seconds over 14.070 seconds of host wall time. The added
 release/fadeout and Amiga-effect work therefore remains outside the 32 kHz ISR
 and does not exhaust the producer queue.
 
-The T10 v4 resource build was checked on the same board after compiling Funky
+The first T10 v4 resource build was checked on the same board after compiling Funky
 Stars to 12 deduplicated song wavetables and five 8 kHz PCM percussion samples
-totalling 5,185 bytes. UART snapshots observed simultaneous PCM activity on two
+totalling 5,185 bytes. This paragraph records the first v4 baseline; the current
+build uses the later 16 kHz resources. UART snapshots observed simultaneous PCM activity on two
 fixed tracker voices; the complete reference run contains ticks with three PCM
 triggers, which the ten-channel design handles without allocation. Firmware
 reported format v4, parser error and underruns stayed zero, signed mix snapshots

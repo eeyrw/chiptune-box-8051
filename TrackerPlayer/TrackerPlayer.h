@@ -53,7 +53,7 @@ typedef struct _TrackerInstrumentState {
     uint8_t volumeLoopEnd;
     uint8_t pitchLength;
     uint8_t pitchLoop;
-    uint16_t fadeout;
+    uint16_t fadeout; /* FT2 domain: 0..32768. */
     uint8_t volumeMacro[TRACKER_MACRO_LENGTH];
     int8_t pitchMacro[TRACKER_MACRO_LENGTH];
 } TrackerInstrumentState;

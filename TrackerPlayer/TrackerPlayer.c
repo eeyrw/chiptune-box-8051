@@ -10,7 +10,7 @@
 #define T10_RESOURCE_HEADER_SIZE 8UL
 #define T10_PCM_ENTRY_SIZE 8UL
 #define T10_WAVE_SIZE 16UL
-#define T10_PCM_RATE 8000U
+#define T10_PCM_RATE 16000U
 #define T10_SAMPLE_RATE 32000UL
 
 #define CELL_NOTE 0x01
@@ -229,7 +229,7 @@ static uint8_t decode_row(MEM_XDATA(TrackerVm) *vm)
             if (!load_instrument(vm, instrument, &channel->definition)) { trackerLastError = 0x88; return 0; }
             channel->instrument = instrument;
             channel->volumePosition = channel->volumeTick = channel->pitchPosition = 0;
-            channel->fadeout = 0xFFFF;
+            channel->fadeout = 0x8000;
         }
         if (mask & CELL_VOLUME) channel->volume = volume;
         if (effect == 0x0F && parameter) {
@@ -247,8 +247,8 @@ static uint8_t decode_row(MEM_XDATA(TrackerVm) *vm)
                 channel->note = channel->target = pitch;
                 channel->keyOn = channel->gate = 1;
                 channel->volumePosition = channel->volumeTick = channel->pitchPosition = 0;
-                channel->fadeout = 0xFFFF;
-                channel->volume = (mask & CELL_VOLUME) ? volume : 64;
+                channel->fadeout = 0x8000;
+                if (!(mask & CELL_VOLUME) && instrument) channel->volume = 64;
                 vm->pendingReset |= bit;
             }
         }
@@ -261,7 +261,7 @@ static void retrigger_channel(MEM_XDATA(TrackerVm) *vm, uint8_t index)
     vm->channel[index].volumePosition = 0;
     vm->channel[index].volumeTick = 0;
     vm->channel[index].pitchPosition = 0;
-    vm->channel[index].fadeout = 0xFFFF;
+    vm->channel[index].fadeout = 0x8000;
     vm->channel[index].keyOn = 1;
     vm->pendingReset |= (uint16_t)1 << index;
 }
@@ -433,15 +433,19 @@ static uint8_t vm_next_event(MEM_XDATA(TrackerVm) *vm, MEM_XDATA(TrackerControlE
         if (volumePosition >= channel->definition.volumeLength)
             volumePosition = channel->definition.volumeLength - 1;
         if (channel->gate) {
-            uint16_t level = ((uint16_t)channel->volume * channel->definition.gain + 32U) >> 6;
-            control.volume = (uint8_t)((level * channel->definition.volumeMacro[volumePosition] + 16U) >> 5);
+            /* Keep two fractional mixer bits so quiet XM voices survive. */
+            uint16_t level = (uint16_t)channel->volume * channel->definition.gain
+                           * channel->definition.volumeMacro[volumePosition];
+            control.volume = (uint8_t)((level + 256U) >> 9);
             if (!channel->keyOn)
                 control.volume = (uint8_t)(((uint16_t)control.volume
-                                  * ((channel->fadeout >> 8) + 1U)) >> 8);
+                                  * (channel->fadeout >> 7)) >> 8);
         } else control.volume = 0;
-        if (control.volume > 31) control.volume = 31;
+        if (control.volume > 127) control.volume = 127;
         if (channel->definition.mode >= WT_MODE_PCM_BASE
          && channel->definition.mode < WT_MODE_NOISE_LONG) {
+            control.volume = (control.volume + 2U) >> 2;
+            if (control.volume > 31) control.volume = 31;
             if ((vm->pendingReset & bit) && control.volume) {
                 pcmEntry = vm->pcmDirectoryOffset
                          + (uint32_t)(channel->definition.mode - WT_MODE_PCM_BASE)
@@ -598,7 +602,9 @@ uint8_t TrackerPlayerStart(MEM_XDATA(TrackerPlayer) *player, uint8_t mode)
      || stream_u8(&player->scheduler.playlistStream, 1) != '1'
      || stream_u8(&player->scheduler.playlistStream, 2) != '0'
      || stream_u8(&player->scheduler.playlistStream, 3) != 'P'
-     || stream_u8(&player->scheduler.playlistStream, 4) != 4) {
+     || stream_u8(&player->scheduler.playlistStream, 4) != 4
+     || stream_u8(&player->scheduler.playlistStream, 5)
+     || stream_u32(&player->scheduler.playlistStream, 12)) {
         trackerLastError = 0x10;
         player->vm.status = TRACKER_ERROR;
         return 0;
@@ -659,7 +665,7 @@ void TrackerPlayerSampleTick(void) __using(1)
             wavetableSynth.voice[i].phase[1] = event->voice[i].increment[1];
             wavetableSynth.voice[i].phase[2] = event->voice[i].increment[2];
             wavetableSynth.voice[i].increment[0] = event->voice[i].waveOffset;
-            wavetableSynth.voice[i].increment[2] = i & 3;
+            wavetableSynth.voice[i].increment[2] = i & 1;
             wavetableSynth.voice[i].volume = event->voice[i].volume;
             continue;
         }

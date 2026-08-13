@@ -1,12 +1,13 @@
+import math
 import struct
 
 import pytest
 
-from tools.tracker10.format import (ENV_ENABLED, ENV_SUSTAIN, MODE_PCM_BASE,
+from tools.tracker10.format import (ENV_ENABLED, ENV_SUSTAIN, MODE_PCM_BASE, PCM_RATE,
                                     Cell, Instrument, PcmSample, Song, decode_track, encode_track,
-                                    inspect_track, pack_playlist)
+                                    inspect_playlist, inspect_track, pack_playlist)
 from tools.tracker10.reference import ReferencePlayer
-from tools.tracker10.xm import (XmError, XmSample, _instrument_note_counts,
+from tools.tracker10.xm import (XmError, XmSample, _instrument_note_counts, analyze_xm,
                                _pcm_sample, compile_xm, parse_xm)
 
 
@@ -33,6 +34,23 @@ def test_semantic_track_playlist_and_crc():
                     "waves": 1, "pcm_samples": 0, "pcm_bytes": 0,
                     "cells": 2, "nonempty_rows": 2, "track_bytes": len(track)}
     assert decode_track(track) == simple_song()
+    assert inspect_playlist(image)["tracks"] == [info]
+
+
+def test_playlist_rejects_bad_track_range():
+    image = bytearray(pack_playlist([encode_track(simple_song())]))
+    struct.pack_into("<I", image, 16, 25)
+    with pytest.raises(ValueError, match="track 0 range"):
+        inspect_playlist(bytes(image))
+
+
+def test_playlist_rejects_overlapping_tracks():
+    track = encode_track(simple_song())
+    image = bytearray(pack_playlist([track, track]))
+    first_offset, first_length = struct.unpack_from("<II", image, 16)
+    struct.pack_into("<II", image, 24, first_offset, first_length)
+    with pytest.raises(ValueError, match="overlap"):
+        inspect_playlist(bytes(image))
 
 
 def test_order_reuse_does_not_duplicate_pattern_data():
@@ -91,14 +109,42 @@ def test_reference_preserves_same_sample_simultaneous_pcm_triggers():
     assert ReferencePlayer(song).step().pcm_triggers == ((0, 31), (0, 31))
 
 
+def test_quiet_tonal_voice_retains_fractional_mixer_gain():
+    empty = (Cell(),) * 10
+    row = list(empty)
+    row[0] = Cell(note=33, instrument=1, volume=5)
+    song = Song((0,), 0, 1, 125, ((tuple(row),),),
+                (Instrument(mode=0, gain=23),))
+    frame = ReferencePlayer(song).step()
+    assert frame.voices[0].volume == 6
+
+
 def test_pcm_one_shot_fades_to_zero_without_changing_length():
-    sample = XmSample("tail", (64,) * 64, 0, 0, 64, 0, 0, 0)
+    sample = XmSample("tail", tuple(range(-64, 64)), 0, 0, 64, 0, 0, 0)
     pcm = _pcm_sample(sample, 49).data
     signed = tuple(value - 256 if value & 0x80 else value for value in pcm)
-    assert len(pcm) == 62
-    assert signed[-32] == 64
+    assert len(pcm) == math.ceil(128 * PCM_RATE / 8363)
     assert signed[-1] == 0
-    assert all(left >= right >= 0 for left, right in zip(signed[-32:], signed[-31:]))
+    assert abs(signed[-2]) <= abs(signed[-PCM_RATE // 250])
+
+
+def test_pcm_one_shot_removes_dc_and_preserves_quiet_dynamics():
+    loud = XmSample("loud", tuple(([100] * 8 + [-20] * 8) * 16), 0, 0, 64, 0, 0, 0)
+    quiet = XmSample("quiet", tuple(([12] * 8 + [-12] * 8) * 16), 0, 0, 64, 0, 0, 0)
+    loud_values = tuple(value - 256 if value & 0x80 else value
+                        for value in _pcm_sample(loud, 49).data[:-(PCM_RATE // 250)])
+    quiet_values = tuple(value - 256 if value & 0x80 else value
+                         for value in _pcm_sample(quiet, 49).data[:-(PCM_RATE // 250)])
+    assert abs(sum(loud_values) / len(loud_values)) < 1
+    assert 12 in quiet_values and -12 in quiet_values
+    assert max(map(abs, quiet_values)) <= 16
+
+
+def test_pcm_resampler_attenuates_source_nyquist_energy():
+    sample = XmSample("nyquist", tuple((64, -64) * 128), 0, 0, 64, 0, 0, 0)
+    values = tuple(value - 256 if value & 0x80 else value
+                   for value in _pcm_sample(sample, 49).data[:-(PCM_RATE // 250)])
+    assert max(map(abs, values)) < 56
 
 
 def minimal_xm(effect: int = 0, parameter: int = 0) -> bytes:
@@ -156,6 +202,50 @@ def test_xm_instrument_and_pattern_are_preserved_semantically():
     assert inspect_track(track)["cells"] == 1
 
 
+def test_xm_analysis_reports_unsupported_instrument_automation():
+    module = parse_xm(minimal_xm())
+    instrument = module.instruments[0]
+    instrument = type(instrument)(**{**instrument.__dict__, "panning_type": 1,
+                                    "vibrato_depth": 2, "vibrato_rate": 3})
+    module = type(module)(**{**module.__dict__, "instruments": (instrument,)})
+    warnings = analyze_xm(module)["warnings"]
+    assert "enabled panning envelopes are not rendered" in warnings
+    assert "instrument automatic vibrato is not rendered" in warnings
+
+
+def test_zero_order_preview_is_rejected():
+    with pytest.raises(XmError, match="at least one"):
+        compile_xm(parse_xm(minimal_xm()), 0)
+
+
+@pytest.mark.parametrize(("offset", "value", "message"), (
+    (58, b"\x03\x01", "unsupported XM version"),
+    (625, b"\x41", "invalid volume"),
+    (627, b"\x03", "unsupported type flags"),
+))
+def test_malformed_xm_sample_metadata_is_rejected(offset, value, message):
+    data = bytearray(minimal_xm())
+    data[offset:offset + len(value)] = value
+    with pytest.raises(XmError, match=message):
+        parse_xm(bytes(data))
+
+
+def test_xm_keymap_cannot_reference_missing_sample():
+    data = bytearray(minimal_xm())
+    data[383] = 1
+    with pytest.raises(XmError, match="keymap"):
+        parse_xm(bytes(data))
+
+
+def test_xm_cell_cannot_reference_missing_instrument():
+    module = parse_xm(minimal_xm())
+    row = list(module.patterns[0][0])
+    row[0] = Cell(note=49, instrument=2)
+    module = type(module)(**{**module.__dict__, "patterns": ((tuple(row),),)})
+    with pytest.raises(XmError, match="unknown instrument 2"):
+        compile_xm(module)
+
+
 def test_unsupported_effect_fails_instead_of_sounding_wrong():
     module = parse_xm(minimal_xm(5, 1))
     with pytest.raises(XmError, match="unsupported effect"):
@@ -195,7 +285,7 @@ def test_keyoff_releases_envelope_instead_of_cutting_immediately():
         row[0] = cell
         rows.append(tuple(row))
     instrument = Instrument(gain=20, volume_flags=ENV_ENABLED | ENV_SUSTAIN,
-                            volume_sustain=0, fadeout=32768)
+                            volume_sustain=0, fadeout=16384)
     song = Song((0,), 0, 1, 125, (tuple(rows),), (instrument,))
     player = ReferencePlayer(song)
     frames = [player.step() for _ in range(4)]
@@ -203,6 +293,19 @@ def test_keyoff_releases_envelope_instead_of_cutting_immediately():
     assert frames[1].voices[0].volume > 0
     assert frames[2].voices[0].volume > 0
     assert frames[3].voices[0].volume == 0
+
+
+def test_new_note_without_instrument_keeps_current_channel_volume():
+    empty = (Cell(),) * 10
+    rows = []
+    for cell in (Cell(note=49, instrument=1, volume=17), Cell(note=50)):
+        row = list(empty)
+        row[0] = cell
+        rows.append(tuple(row))
+    song = Song((0,), 0, 1, 125, (tuple(rows),), (Instrument(gain=31),))
+    player = ReferencePlayer(song)
+    first, second = player.step(), player.step()
+    assert first.voices[0].volume == second.voices[0].volume
 
 
 def test_amiga_effect_scaling_is_note_dependent():

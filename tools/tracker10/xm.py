@@ -6,7 +6,8 @@ from collections import Counter
 from dataclasses import dataclass
 
 from .format import (ENV_ENABLED, ENV_LOOP, ENV_SUSTAIN, Cell, Instrument,
-                     MAX_WAVES, MODE_PCM_BASE, PcmSample, Song, encode_track)
+                     MAX_WAVES, MODE_PCM_BASE, PCM_RATE, PcmSample, Song,
+                     encode_track)
 
 
 class XmError(ValueError):
@@ -36,6 +37,11 @@ class XmInstrument:
     volume_loop_end: int
     volume_type: int
     volume_fadeout: int
+    panning_type: int = 0
+    vibrato_type: int = 0
+    vibrato_sweep: int = 0
+    vibrato_depth: int = 0
+    vibrato_rate: int = 0
 
 
 @dataclass(frozen=True)
@@ -77,11 +83,14 @@ def parse_xm(data: bytes) -> XmModule:
         raise XmError("not a FastTracker II XM module")
     u16 = lambda p: struct.unpack_from("<H", data, p)[0]
     u32 = lambda p: struct.unpack_from("<I", data, p)[0]
+    if u16(58) != 0x0104:
+        raise XmError(f"unsupported XM version {u16(58) >> 8}.{u16(58) & 0xff:02d}; expected 1.04")
     header_size = u32(60)
     song_length, restart = u16(64), u16(66)
     channel_count, pattern_count, instrument_count = u16(68), u16(70), u16(72)
     flags, speed, bpm = u16(74), u16(76), u16(78)
-    if not 1 <= song_length <= 256 or not 1 <= channel_count <= 64 or not speed or not bpm:
+    if header_size < 276 or 60 + header_size > len(data) or not 1 <= song_length <= 256 \
+     or not 1 <= channel_count <= 64 or not speed or not bpm:
         raise XmError("invalid XM header")
     orders = tuple(data[80:80 + song_length])
     if len(orders) != song_length or any(x >= pattern_count for x in orders):
@@ -92,9 +101,10 @@ def parse_xm(data: bytes) -> XmModule:
     for _ in range(pattern_count):
         if cursor + 9 > len(data):
             raise XmError("truncated XM pattern header")
-        header_length, rows, packed_size = u32(cursor), u16(cursor + 5), u16(cursor + 7)
+        header_length, packing, rows, packed_size = (u32(cursor), data[cursor + 4],
+                                                     u16(cursor + 5), u16(cursor + 7))
         pos, end = cursor + header_length, cursor + header_length + packed_size
-        if header_length < 9 or not 1 <= rows <= 256 or end > len(data):
+        if header_length < 9 or packing or not 1 <= rows <= 256 or end > len(data):
             raise XmError("invalid XM pattern")
         pattern: list[tuple[Cell, ...]] = []
         for _row in range(rows):
@@ -136,6 +146,7 @@ def parse_xm(data: bytes) -> XmModule:
         keymap: tuple[int, ...] = ()
         volume_points: tuple[tuple[int, int], ...] = ()
         sustain = loop_start = loop_end = volume_type = fadeout = 0
+        panning_type = vibrato_type = vibrato_sweep = vibrato_depth = vibrato_rate = 0
         sample_header_size = 0
         if sample_count:
             if header_length < 243:
@@ -144,12 +155,26 @@ def parse_xm(data: bytes) -> XmModule:
             if sample_header_size < 40:
                 raise XmError("short XM sample header")
             keymap = tuple(data[start + 33:start + 129])
-            point_count = min(data[start + 225], 12)
+            point_count = data[start + 225]
+            if point_count > 12:
+                raise XmError(f"instrument {_ + 1} has too many volume-envelope points")
             volume_points = tuple((u16(start + 129 + i * 4), u16(start + 131 + i * 4))
                                   for i in range(point_count))
             sustain, loop_start, loop_end = data[start + 227:start + 230]
             volume_type = data[start + 233]
+            panning_type = data[start + 234]
+            vibrato_type, vibrato_sweep, vibrato_depth, vibrato_rate = data[start + 235:start + 239]
             fadeout = u16(start + 239)
+            if volume_type & ~7 or panning_type & ~7:
+                raise XmError(f"instrument {_ + 1} has invalid envelope flags")
+            if any(level > 64 for _tick, level in volume_points) or any(
+                    left[0] > right[0] for left, right in zip(volume_points, volume_points[1:])):
+                raise XmError(f"instrument {_ + 1} has an invalid volume envelope")
+            if volume_type & 2 and (not point_count or sustain >= point_count):
+                raise XmError(f"instrument {_ + 1} has an invalid volume sustain point")
+            if volume_type & 4 and (not point_count or loop_start > loop_end
+                                    or loop_end >= point_count):
+                raise XmError(f"instrument {_ + 1} has an invalid volume loop")
 
         sample_headers = start + header_length
         sample_data = sample_headers + sample_count * sample_header_size
@@ -163,20 +188,32 @@ def parse_xm(data: bytes) -> XmModule:
             sample_type = data[pos + 14]
             if raw_cursor + length > len(data):
                 raise XmError("truncated XM sample data")
+            if data[pos + 12] > 64:
+                raise XmError(f"instrument {_ + 1} sample {index + 1} has invalid volume")
+            if sample_type & ~0x13 or sample_type & 3 == 3:
+                raise XmError(f"instrument {_ + 1} sample {index + 1} has unsupported type flags")
             sixteen_bit = bool(sample_type & 0x10)
+            if sixteen_bit and (length & 1 or raw_loop_start & 1 or raw_loop_length & 1):
+                raise XmError(f"instrument {_ + 1} sample {index + 1} has unaligned 16-bit ranges")
+            if sample_type & 3 and (not raw_loop_length or raw_loop_start > length
+                                    or raw_loop_length > length - raw_loop_start):
+                raise XmError(f"instrument {_ + 1} sample {index + 1} has an invalid loop")
             values = _decode_sample(data[raw_cursor:raw_cursor + length], sixteen_bit)
             divisor = 2 if sixteen_bit else 1
             samples.append(XmSample(
                 _text(data[pos + 18:pos + 40]), values,
                 raw_loop_start // divisor, raw_loop_length // divisor,
-                min(data[pos + 12], 64), struct.unpack_from("b", data, pos + 13)[0],
+                data[pos + 12], struct.unpack_from("b", data, pos + 13)[0],
                 sample_type & 3, struct.unpack_from("b", data, pos + 16)[0],
             ))
             raw_cursor += length
+        if sample_count and any(sample_index >= sample_count for sample_index in keymap):
+            raise XmError(f"instrument {_ + 1} keymap references an unknown sample")
         cursor = raw_cursor
         instruments.append(XmInstrument(
             _text(data[start + 4:start + 26]), keymap, tuple(samples), volume_points,
-            sustain, loop_start, loop_end, volume_type, fadeout,
+            sustain, loop_start, loop_end, volume_type, fadeout, panning_type,
+            vibrato_type, vibrato_sweep, vibrato_depth, vibrato_rate,
         ))
     if cursor != len(data):
         raise XmError("trailing data after XM instruments")
@@ -248,20 +285,37 @@ def _wave_table(sample: XmSample) -> tuple[int, ...]:
 
 def _pcm_sample(sample: XmSample, note: int) -> PcmSample:
     semitones = note - 49 + sample.relative_note + sample.finetune / 128.0
-    source_step = 8363.0 * (2.0 ** (semitones / 12.0)) / 8000.0
+    source_step = 8363.0 * (2.0 ** (semitones / 12.0)) / PCM_RATE
     output = []
     position = 0.0
+    radius = 8
+    cutoff = min(0.5, 0.5 / source_step) * 0.94
     while int(position) < len(sample.values):
-        left = int(position)
-        right = min(len(sample.values) - 1, left + 1)
-        fraction = position - left
-        value = round(sample.values[left] * (1.0 - fraction) + sample.values[right] * fraction)
-        output.append(max(-128, min(127, value)) & 0xFF)
+        center = int(position)
+        value = weight_sum = 0.0
+        for source_index in range(center - radius + 1, center + radius + 1):
+            if not 0 <= source_index < len(sample.values):
+                continue
+            distance = position - source_index
+            sinc_arg = 2.0 * cutoff * distance
+            sinc = 1.0 if sinc_arg == 0.0 else math.sin(math.pi * sinc_arg) / (math.pi * sinc_arg)
+            window = 0.5 + 0.5 * math.cos(math.pi * distance / radius)
+            weight = 2.0 * cutoff * sinc * window
+            value += sample.values[source_index] * weight
+            weight_sum += weight
+        output.append(max(-128, min(127, round(value / weight_sum if weight_sum else 0.0))))
         position += source_step
+    # Remove source DC offline. Preserve the sample's original dynamics; PCM
+    # balance is an arrangement/mixer concern, not a normalization target.
+    if output:
+        mean = sum(output) / len(output)
+        centered = [value - mean for value in output]
+        output = [max(-128, min(127, round(value))) & 0xFF
+                  for value in centered]
     # A one-shot ending away from zero clicks when the fixed voice becomes
     # silent. Smooth only the last 4 ms offline; the MCU keeps a branch-free
     # end-of-sample transition and the encoded length does not change.
-    fade = min(32, len(output))
+    fade = min(PCM_RATE // 250, len(output))
     if fade:
         divisor = max(1, fade - 1)
         for index in range(fade):
@@ -329,9 +383,56 @@ def _instrument_note_counts(module: XmModule, orders: tuple[int, ...]) -> list[C
     return counts
 
 
+def analyze_xm(module: XmModule) -> dict:
+    effects: Counter[str] = Counter()
+    volume_commands: Counter[str] = Counter()
+    instrument_only = 0
+    for pattern_index in module.orders:
+        for row in module.patterns[pattern_index]:
+            for cell in row:
+                if cell.effect or cell.parameter:
+                    effects[f"{cell.effect:X}xx"] += 1
+                if cell.volume:
+                    volume_commands[f"{cell.volume >> 4:X}x"] += 1
+                if cell.instrument and not cell.note:
+                    instrument_only += 1
+
+    warnings = []
+    if module.channels > 10:
+        warnings.append(f"module has {module.channels} channels; Tracker10 accepts at most 10")
+    if effects["8xx"] or volume_commands["Cx"]:
+        warnings.append("panning commands are discarded because hardware output is mono")
+    if any(instrument.panning_type & 1 for instrument in module.instruments):
+        warnings.append("enabled panning envelopes are not rendered")
+    if any(instrument.vibrato_depth and instrument.vibrato_rate
+           for instrument in module.instruments):
+        warnings.append("instrument automatic vibrato is not rendered")
+    if any(len(instrument.samples) > 1 for instrument in module.instruments):
+        warnings.append("multisample instruments use only the sample mapped by their most common note")
+    if instrument_only:
+        warnings.append(f"{instrument_only} instrument-only cells use reduced Tracker10 semantics")
+
+    return {
+        "title": module.title,
+        "channels": module.channels,
+        "orders": len(module.orders),
+        "patterns": len(module.patterns),
+        "instruments": len(module.instruments),
+        "samples": sum(len(instrument.samples) for instrument in module.instruments),
+        "speed": module.speed,
+        "bpm": module.bpm,
+        "frequency_mode": "linear" if module.linear_frequency else "amiga",
+        "effects": dict(sorted(effects.items())),
+        "volume_commands": dict(sorted(volume_commands.items())),
+        "warnings": warnings,
+    }
+
+
 def compile_xm(module: XmModule, max_orders: int | None = None) -> tuple[bytes, dict]:
     if module.channels > 10:
         raise XmError(f"XM has {module.channels} channels; maximum is 10")
+    if max_orders is not None and max_orders < 1:
+        raise XmError("max-orders must be at least one")
     order_count = len(module.orders) if max_orders is None else min(max_orders, len(module.orders))
     selected_orders = module.orders[:order_count]
     used_patterns: list[int] = []
@@ -343,8 +444,12 @@ def compile_xm(module: XmModule, max_orders: int | None = None) -> tuple[bytes, 
     for source_index in used_patterns:
         normalized_rows = []
         for row_index, source_row in enumerate(module.patterns[source_index]):
-            row = [_normalize_cell(cell, source_index, row_index, channel)
-                   for channel, cell in enumerate(source_row)]
+            row = []
+            for channel, cell in enumerate(source_row):
+                if cell.instrument > len(module.instruments):
+                    raise XmError(f"unknown instrument {cell.instrument} at "
+                                  f"{source_index}:{row_index}:{channel}")
+                row.append(_normalize_cell(cell, source_index, row_index, channel))
             row.extend(Cell() for _ in range(10 - len(row)))
             normalized_rows.append(tuple(row))
         patterns.append(tuple(normalized_rows))

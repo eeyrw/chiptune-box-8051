@@ -117,7 +117,7 @@ static void dispatch(void)
         for(i=0;i<WT_VOICE_COUNT;i++) if(wavetableSynth.voice[i].volume&0x80)
             pcmActive|=(uint16_t)1<<i;
         data[8]=pcmActive; data[9]=pcmActive>>8;
-        wavetableSynth.muteMask &= 0x03FF;
+        wavetableSynth.muteMask &= 0x07FF;
         Platform_IrqRestore(irq);
         respond(pkt_cmd,STATUS_OK,data,10); break;
     case CMD_ADC_READ:
@@ -147,7 +147,7 @@ static void dispatch(void)
         data[0]='T';data[1]='1';data[2]='0';data[3]='M';data[4]=4;data[5]=WT_VOICE_COUNT;data[6]=0x00;data[7]=0x7d;
         respond(pkt_cmd,STATUS_OK,data,8); break;
     case CMD_CHANNEL_MUTE:
-        if(pkt_len!=2 || (pkt_data[1]&0xfc)) error(pkt_cmd,STATUS_INVALID_PARAM);
+        if(pkt_len!=2 || (pkt_data[1]&0xf8)) error(pkt_cmd,STATUS_INVALID_PARAM);
         else { WavetableSynthSetMuteMask((uint16_t)pkt_data[0]|((uint16_t)pkt_data[1]<<8)); ok(pkt_cmd); } break;
     case CMD_SYS_INFO:
     case CMD_FLASH_INFO:

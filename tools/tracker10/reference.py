@@ -44,7 +44,7 @@ class Channel:
     volume_position: int = 0
     pitch_position: int = 0
     volume_tick: int = 0
-    fadeout: int = 0xFFFF
+    fadeout: int = 0x8000
     key_on: bool = False
     gate: bool = False
     reset: bool = False
@@ -97,7 +97,7 @@ class ReferencePlayer:
             if cell.instrument:
                 channel.instrument = self.song.instruments[cell.instrument - 1]
                 channel.volume_position = channel.pitch_position = channel.volume_tick = 0
-                channel.fadeout = 0xFFFF
+                channel.fadeout = 0x8000
             if cell.volume:
                 channel.volume = cell.volume - 1
             if cell.effect == 0x0F and cell.parameter:
@@ -117,8 +117,9 @@ class ReferencePlayer:
                     channel.note = channel.target = pitch
                     channel.key_on = channel.gate = True
                     channel.volume_position = channel.pitch_position = channel.volume_tick = 0
-                    channel.fadeout = 0xFFFF
-                    channel.volume = cell.volume - 1 if cell.volume else 64
+                    channel.fadeout = 0x8000
+                    if not cell.volume and cell.instrument:
+                        channel.volume = 64
                     channel.reset = True
 
     def _effects(self) -> None:
@@ -194,14 +195,15 @@ class ReferencePlayer:
                     pitch += SINE[channel.vibrato_phase >> 2] * ((amplitude + 4) >> 3) >> 4
                 else:
                     pitch += SINE[channel.vibrato_phase >> 2] * channel.vibrato_depth // 16
-            level = (channel.volume * instrument.gain + 32) >> 6
-            volume = (level * instrument.volume_macro[channel.volume_position] + 16) >> 5
+            level = channel.volume * instrument.gain * instrument.volume_macro[channel.volume_position]
+            volume = (level + 256) >> 9
             if not channel.key_on:
-                volume = volume * channel.fadeout >> 16
-            output_volume = min(31, volume) if channel.gate else 0
+                volume = volume * channel.fadeout >> 15
+            output_volume = min(127, volume) if channel.gate else 0
             if MODE_PCM_BASE <= instrument.mode < MODE_NOISE_LONG:
-                trigger = (instrument.mode - MODE_PCM_BASE, output_volume)
-                if channel.reset and output_volume:
+                pcm_volume = min(31, (output_volume + 2) >> 2)
+                trigger = (instrument.mode - MODE_PCM_BASE, pcm_volume)
+                if channel.reset and pcm_volume:
                     pcm_triggers.append(trigger)
                 output_volume = 0
             voices.append(VoiceFrame(max(1, min(0xFFFF, pitch)), output_volume,

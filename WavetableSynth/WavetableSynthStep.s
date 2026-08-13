@@ -112,14 +112,18 @@ wt_table'Idx'$:
 
     ; In PCM mode phase[0..1] is the Code Flash cursor, phase[2] and
     ; increment[0] are a 16-bit remaining-sample count, increment[1] caches the
-    ; current sample, and increment[2] is a per-voice divide-by-four counter.
+    ; current sample, and increment[2] is a per-voice divide-by-two counter.
     ; Volume bit 7 tags PCM, bit 6 requests cache priming, and the low five bits
-    ; retain mixer gain.
+    ; retain mixer gain. Scale PCM to the tonal lane's 7-bit gain domain.
 wt_pcm'Idx'$:
     anl a,#0x1f
     mov r4,a
     clr c
     rrc a
+    add a,r4
+    mov r4,a
+    add a,r4
+    mov r4,a
     add a,r4
     mov r4,a
     mov a,(pVoice + WT_PHASE_2)
@@ -147,7 +151,7 @@ wt_pcm_fetch'Idx'$:
     clr a
     movc a,@a+dptr
     mov (pVoice + WT_INCREMENT_1),a
-    mov (pVoice + WT_INCREMENT_2),#3
+    mov (pVoice + WT_INCREMENT_2),#1
     anl (pVoice + WT_VOLUME),#0xBF
     inc (pVoice + WT_PHASE_0)
     mov a,(pVoice + WT_PHASE_0)
@@ -162,6 +166,8 @@ wt_pcm_count_low'Idx'$:
 wt_pcm_cached'Idx'$:
     mov a,r1
     jnz wt_voice_done'Idx'$
+    mov a,(WT_SYNTH_ABS_ADDR + WT_MUTE_OFFSET + 1)
+    jb acc.2,wt_voice_done'Idx'$
     mov a,(pVoice + WT_INCREMENT_1)
     mov r1,#1
 wt_sample'Idx'$:
@@ -213,8 +219,29 @@ wt_phase'Idx'$:
 wt_voice_done'Idx'$:
 .endm
 
-    ; Signed 24-bit sum >> 8 gives ten full-scale voices shared headroom.
+    ; Tonal controls use 7-bit gain. Signed sum >> 10 preserves the previous
+    ; ten-voice headroom while retaining two more low-level volume bits.
     ; Saturate the remaining rare extreme before biasing to unsigned PWM.
+    mov a,r7
+    mov c,acc.7
+    rrc a
+    mov r7,a
+    mov a,r6
+    rrc a
+    mov r6,a
+    mov a,r5
+    rrc a
+    mov r5,a
+    mov a,r7
+    mov c,acc.7
+    rrc a
+    mov r7,a
+    mov a,r6
+    rrc a
+    mov r6,a
+    mov a,r5
+    rrc a
+    mov r5,a
     mov a,r6
     mov r5,a
     mov a,r7

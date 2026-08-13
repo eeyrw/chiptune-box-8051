@@ -141,7 +141,7 @@ The resource section begins with an eight-byte `T10R` header:
 | 0 | 4 | magic | ASCII `T10R` |
 | 4 | 1 | wavetable count | `1..16` |
 | 5 | 1 | PCM sample count | `0..126` |
-| 6 | 2 | PCM sample rate | `8000` Hz |
+| 6 | 2 | PCM sample rate | `16000` Hz |
 
 Immediately following the header are `wavetable count` signed 16-byte tables.
 Each table is one normalized oscillator cycle. Their location is fixed by the
@@ -156,12 +156,16 @@ An eight-byte directory entry follows for every PCM sample:
 | 4 | 2 | sample length in bytes, `1..65535` |
 | 6 | 2 | reserved, zero |
 
-PCM data follows the directory. Samples are signed, mono, eight-bit, 8 kHz and
+PCM data follows the directory. Samples are signed, mono, eight-bit, 16 kHz and
 one-shot. The compiler resamples XM percussion offline using the sample's
-relative note and finetune at its most frequently triggered source note. The
-final 32 samples receive a 4 ms linear fade to zero, preventing a non-zero final
-sample from clicking when its fixed voice becomes silent. The MCU therefore
-performs neither rate conversion, interpolation nor end-of-sample fading.
+relative note and finetune at its most frequently triggered source note. A
+16-tap windowed-sinc low-pass resampler prevents spectral folding when the
+source playback rate exceeds the resource Nyquist limit. It
+removes DC but preserves the source's dynamic range; the compiler does not
+normalize unrelated percussion samples toward a common loudness. The final 64
+samples receive a 4 ms linear fade to zero, preventing a non-zero final sample
+from clicking when its fixed voice becomes silent. The MCU therefore performs
+neither rate conversion, interpolation, normalization nor end-of-sample fading.
 
 Both resource types are deliberately internal-Code-Flash-only in v4. The ISR
 uses `MOVC` directly and never performs SPI I/O, buffer filling or audio
@@ -203,7 +207,9 @@ released and the position continues. An enabled loop moves from loop end back to
 loop start both before and after key-off. Fadeout, rather than disabling the
 envelope loop, eventually silences a released voice.
 
-Fadeout state starts at `65535`. On every released tracker tick the instrument
+Fadeout state starts at `32768`, matching FastTracker II's actual internal
+range rather than the nominal 16-bit range in early XM documentation. On every
+released tracker tick the instrument
 fadeout value is subtracted with saturation at zero. Output volume is additionally
 scaled by this state. Fadeout is evaluated only when the volume-envelope enabled
 flag is set. Key-off immediately silences an instrument with no enabled volume
@@ -213,11 +219,11 @@ Volume macro entries are `0..32`. Runtime output volume is evaluated in two
 rounded 16-bit stages to avoid overflow on the 8051:
 
 ```text
-level = (channel_volume * instrument_gain + 32) / 64
-output = (level * macro_value + 16) / 32
+output = (channel_volume * instrument_gain * macro_value + 256) / 512
 ```
 
-The result is clamped to `0..31`. Pitch macro entries are signed
+The tonal runtime result is clamped to `0..127`; PCM triggers are converted to
+`0..31` because the upper control bits tag PCM state. Pitch macro entries are signed
 quarter-semitone offsets. They are added to the
 Q8.8 channel pitch by multiplying by 64.
 
@@ -244,9 +250,9 @@ A PCM note still occupies its fixed tracker channel; there is no dynamic PCM
 voice allocator. On a PCM trigger, the normal five-byte control payload carries
 Code Flash start address, 16-bit sample length and the volume with bits 7 and 6
 set. Bit 7 selects PCM and bit 6 primes the first sample cache entry.
-The ISR then reuses that channel's eight hot bytes: phase low/mid are the Flash
+The renderer then reuses that channel's eight hot bytes: phase low/mid are the Flash
 cursor, phase high plus increment low are the remaining length, increment mid is
-the cached signed sample, and increment high is the four-interrupt hold counter.
+the cached signed sample, and increment high is the two-frame hold counter.
 Up to all ten fixed voices may therefore play PCM concurrently without enlarging
 the 90-byte DATA hot block or the XRAM event queue. The runtime applies 1.5x PCM
 mixer gain to keep short percussion transients perceptually balanced against
