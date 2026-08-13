@@ -79,8 +79,9 @@ column 或损坏资源；生成完整且 CRC 有效的 T10P；最终 clean link 
 `EDx`、volume-column `8x/9x` 作明确告警的有损近似后，转换通过数从 28 提升到
 152；按当前 29,712 字节固定固件开销计算，143 首可单独链接，9 首因 T10P 过大
 排除。`music/xm/MANIFEST.tsv` 保存逐首结果、warning、哈希和 URL。
-加上单独收录的 JAM、Super Mario 2 和 Traven Tetris high scores，当前集合共
-146 对 XM/T10P：13 首 `exact`，133 首 `approximate`；全部通过 fresh compile
+加上单独收录的 JAM、Super Mario 2、Traven Tetris high scores 和贝多芬
+`Fur Elise`，当前集合共 147 对 XM/T10P：13 首 `exact`，134 首 `approximate`；
+全部通过 fresh compile
 逐字节比对和 SHA-256 校验。
 
 当前剩余阻塞点以超过 10 通道、`E6x` pattern loop、复合效果、损坏/非标准 XM
@@ -114,3 +115,17 @@ https://ftp.modland.com/pub/modules/Fasttracker%202/Dalezy/tetris.xm
 https://api.modarchive.org/downloads.php?moduleid=153373
 https://api.modarchive.org/downloads.php?moduleid=57522
 ```
+
+## 古典音乐候选
+
+| 候选 | 来源 | 结果 |
+|---|---|---|
+| Beethoven / `Fur Elise` | Modland `Steven Stojanovich/fur elise.xm` | approximate；7,450-byte T10P；多采样乐器简化；已收录并上板 |
+| Tchaikovsky / `The Nutcracker Overture` | Modland `Dat/the nutcracker overature.xm` | approximate；14,028-byte T10P；多采样乐器简化 |
+| Pachelbel / `Canon In D-igital` | Modland `Pachebel/canon in d-igital.xm` | 62,921-byte T10P，最终固件超过程序区 |
+| Mozart / `Rondo Alla Turca` | Modland `Toed/rondo alla turca.xm` | 拒绝：12 通道 |
+| Bach-Busoni / `Toccata` | Modland `Mad God/bach-busoni toccata.xm` | 拒绝：`E01` fine portamento up 尚未支持 |
+
+`E1x` 只在 tracker row 的 tick 0 向上细调 x 个 period 单位。后续可在主机编译器
+中按 XM 的 linear/Amiga frequency mode 降为一次性的 8.8 note delta，不需要增加
+音频 ISR 工作。
