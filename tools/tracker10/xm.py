@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import math
 import struct
+from collections import Counter
 from dataclasses import dataclass
 
 from .format import (ENV_ENABLED, ENV_LOOP, ENV_SUSTAIN, Cell, Instrument,
-                     Song, encode_track)
+                     MAX_WAVES, MODE_PCM_BASE, PcmSample, Song, encode_track)
 
 
 class XmError(ValueError):
@@ -183,61 +184,6 @@ def parse_xm(data: bytes) -> XmModule:
                     channel_count, speed, bpm, tuple(patterns), tuple(instruments), bool(flags & 1))
 
 
-_WAVES = (
-    (96,) * 8 + (-96,) * 8,
-    (112,) * 4 + (-48,) * 12,
-    (120,) * 2 + (-24,) * 14,
-    (-112, -96, -80, -64, -48, -32, -16, 0, 16, 32, 48, 64, 80, 96, 112, 0),
-    (-120, -104, -88, -72, -56, -40, -24, -8, 8, 24, 40, 56, 72, 88, 104, 120),
-    (0, 45, 83, 108, 117, 108, 83, 45, 0, -45, -83, -108, -117, -108, -83, -45),
-)
-
-
-def _resample(values: tuple[int, ...], start: int, length: int) -> tuple[float, ...]:
-    if not values or length <= 0:
-        return (0.0,) * 16
-    end = min(len(values), start + length)
-    source = values[max(0, start):end]
-    if not source:
-        source = values
-    return tuple(float(source[min(len(source) - 1, i * len(source) // 16)]) for i in range(16))
-
-
-def _match_wave(sample: XmSample) -> int:
-    start = sample.loop_start if sample.loop_type else 0
-    length = sample.loop_length if sample.loop_type and sample.loop_length else len(sample.values)
-    source = _resample(sample.values, start, length)
-    source_mean = sum(source) / 16.0
-    source = tuple(x - source_mean for x in source)
-    source_norm = math.sqrt(sum(x * x for x in source)) or 1.0
-    best_score, best_wave = -2.0, 0
-    for wave_index, wave in enumerate(_WAVES):
-        norm = math.sqrt(sum(float(x * x) for x in wave)) or 1.0
-        for shift in range(16):
-            score = abs(sum(source[i] * wave[(i + shift) & 15] for i in range(16)) /
-                        (source_norm * norm))
-            if score > best_score:
-                best_score, best_wave = score, wave_index
-    return best_wave
-
-
-def _sample_envelope(sample: XmSample) -> tuple[int, ...]:
-    values = sample.values
-    if not values:
-        return (32,)
-    # One macro step is approximately one 50 Hz tracker tick at the XM base rate.
-    step = 167
-    count = max(2, min(15, (len(values) + step - 1) // step))
-    levels = []
-    for index in range(count):
-        block = values[index * len(values) // count:(index + 1) * len(values) // count]
-        rms = math.sqrt(sum(x * x for x in block) / max(1, len(block)))
-        levels.append(rms)
-    peak = max(levels) or 1.0
-    result = tuple(max(1, min(32, round(x * 32.0 / peak))) for x in levels) + (0,)
-    return result[:16]
-
-
 def _xm_envelope(instrument: XmInstrument) -> tuple[tuple[int, ...], int, int, int, int, int]:
     if not instrument.volume_type & 1 or not instrument.volume_points:
         return (32,), 1, 0, 0xFF, 0xFF, 0xFF
@@ -275,10 +221,51 @@ def _xm_envelope(instrument: XmInstrument) -> tuple[tuple[int, ...], int, int, i
     return tuple(values) or (32,), step, flags, sustain, loop_start, loop_end
 
 
-def _compile_instrument(instrument: XmInstrument) -> Instrument:
+def _wave_table(sample: XmSample) -> tuple[int, ...]:
+    start = sample.loop_start if sample.loop_type else 0
+    length = sample.loop_length if sample.loop_type and sample.loop_length else len(sample.values)
+    source = sample.values[start:min(len(sample.values), start + length)] or sample.values
+    if not source:
+        return (0,) * 16
+    if len(source) > 256:
+        limit = min(256, len(source) // 2)
+        errors = []
+        span = min(len(source), 1024)
+        energy = sum(value * value for value in source[:span]) or 1
+        for lag in range(8, limit + 1):
+            error = sum((source[index] - source[(index + lag) % len(source)]) ** 2
+                        for index in range(span)) / energy
+            errors.append((error, lag))
+        best = min(error for error, _lag in errors)
+        period = min(lag for error, lag in errors if error <= best * 1.05 + 1e-9)
+        source = source[:period]
+    points = [source[min(len(source) - 1, index * len(source) // 16)] for index in range(16)]
+    mean = sum(points) / 16.0
+    centered = [value - mean for value in points]
+    peak = max(abs(value) for value in centered) or 1.0
+    return tuple(max(-120, min(120, round(value * 120.0 / peak))) for value in centered)
+
+
+def _pcm_sample(sample: XmSample, note: int) -> PcmSample:
+    semitones = note - 49 + sample.relative_note + sample.finetune / 128.0
+    source_step = 8363.0 * (2.0 ** (semitones / 12.0)) / 8000.0
+    output = []
+    position = 0.0
+    while int(position) < len(sample.values):
+        left = int(position)
+        right = min(len(sample.values) - 1, left + 1)
+        fraction = position - left
+        value = round(sample.values[left] * (1.0 - fraction) + sample.values[right] * fraction)
+        output.append(max(-128, min(127, value)) & 0xFF)
+        position += source_step
+    return PcmSample(bytes(output or (0,)))
+
+
+def _compile_instrument(instrument: XmInstrument, note: int
+                        ) -> tuple[Instrument, tuple[int, ...] | None, PcmSample | None]:
     if not instrument.samples:
-        return Instrument(gain=0)
-    sample_index = instrument.keymap[47] if instrument.keymap else 0
+        return Instrument(gain=0), None, None
+    sample_index = instrument.keymap[max(0, min(95, note - 1))] if instrument.keymap else 0
     sample = instrument.samples[min(sample_index, len(instrument.samples) - 1)]
     # relative_note and finetune calibrate the source sample's recorded pitch.
     # T10 replaces that sample with a normalized one-cycle oscillator, so carrying
@@ -287,27 +274,15 @@ def _compile_instrument(instrument: XmInstrument) -> Instrument:
     gain = max(1, min(31, round(sample.volume * 31 / 64)))
     if sample.loop_type and sample.loop_length >= 8:
         volume, step, flags, sustain, loop_start, loop_end = _xm_envelope(instrument)
-        return Instrument(mode=_match_wave(sample), gain=gain, relative_pitch=relative_pitch,
-                          volume_macro=volume, volume_step=step, volume_flags=flags,
-                          volume_sustain=sustain, volume_loop_start=loop_start,
-                          volume_loop_end=loop_end, fadeout=instrument.volume_fadeout)
+        return (Instrument(gain=gain, relative_pitch=relative_pitch,
+                           volume_macro=volume, volume_step=step, volume_flags=flags,
+                           volume_sustain=sustain, volume_loop_start=loop_start,
+                           volume_loop_end=loop_end, fadeout=instrument.volume_fadeout),
+                _wave_table(sample), None)
 
     if len(sample.values) > 256:
-        rms = math.sqrt(sum(x * x for x in sample.values) / len(sample.values)) or 1.0
-        derivative = math.sqrt(sum((b - a) ** 2 for a, b in zip(sample.values, sample.values[1:])) /
-                               max(1, len(sample.values) - 1)) / rms
-        if derivative > 0.42:
-            mode = 6
-        elif derivative > 0.27:
-            mode = 7
-        else:
-            mode = 3
-        volume = _sample_envelope(sample)
-        pitch = (96, 64, 40, 24, 12, 4, 0) if mode == 3 else (0,)
-        return Instrument(mode=mode, gain=gain, relative_pitch=relative_pitch,
-                          volume_macro=volume, volume_flags=ENV_ENABLED,
-                          pitch_macro=pitch, pitch_loop=0xFF)
-    return Instrument(mode=_match_wave(sample), gain=gain, relative_pitch=relative_pitch)
+        return Instrument(gain=gain), None, _pcm_sample(sample, note)
+    return Instrument(gain=gain, relative_pitch=relative_pitch), _wave_table(sample), None
 
 
 def _normalize_cell(cell: Cell, pattern: int, row: int, channel: int) -> Cell:
@@ -328,6 +303,19 @@ def _normalize_cell(cell: Cell, pattern: int, row: int, channel: int) -> Cell:
     elif effect not in (0, 1, 2, 3, 4, 0x0A, 0x0F):
         raise XmError(f"unsupported effect {effect:X}{parameter:02X} at {pattern}:{row}:{channel}")
     return Cell(cell.note, cell.instrument, volume, effect, parameter)
+
+
+def _instrument_note_counts(module: XmModule, orders: tuple[int, ...]) -> list[Counter]:
+    counts = [Counter() for _ in module.instruments]
+    active = [0] * module.channels
+    for pattern_index in orders:
+        for row in module.patterns[pattern_index]:
+            for channel, cell in enumerate(row):
+                if cell.instrument and cell.instrument <= len(counts):
+                    active[channel] = cell.instrument
+                if 1 <= cell.note <= 96 and active[channel]:
+                    counts[active[channel] - 1][cell.note] += 1
+    return counts
 
 
 def compile_xm(module: XmModule, max_orders: int | None = None) -> tuple[bytes, dict]:
@@ -352,13 +340,36 @@ def compile_xm(module: XmModule, max_orders: int | None = None) -> tuple[bytes, 
     restart = 0
     if max_orders is None or max_orders > module.restart:
         restart = min(module.restart, order_count - 1)
+    note_counts = _instrument_note_counts(module, selected_orders)
+    waves: list[tuple[int, ...]] = []
+    pcm_samples: list[PcmSample] = []
+    instruments = []
+    for index, source in enumerate(module.instruments):
+        note = note_counts[index].most_common(1)[0][0] if note_counts[index] else 49
+        instrument, wave, pcm = _compile_instrument(source, note)
+        if wave is not None:
+            if wave not in waves:
+                if len(waves) >= MAX_WAVES:
+                    raise XmError("song needs more than sixteen distinct wavetables")
+                waves.append(wave)
+            instrument = Instrument(**{**instrument.__dict__, "mode": waves.index(wave)})
+        elif pcm is not None:
+            if pcm not in pcm_samples:
+                pcm_samples.append(pcm)
+            instrument = Instrument(**{**instrument.__dict__,
+                                       "mode": MODE_PCM_BASE + pcm_samples.index(pcm)})
+        instruments.append(instrument)
+    if not waves:
+        waves.append((96,) * 8 + (-96,) * 8)
     song = Song(tuple(pattern_map[x] for x in selected_orders), restart, module.speed, module.bpm,
-                tuple(patterns), tuple(_compile_instrument(x) for x in module.instruments),
-                amiga_effects=not module.linear_frequency)
+                tuple(patterns), tuple(instruments), amiga_effects=not module.linear_frequency,
+                waves=tuple(waves), pcm_samples=tuple(pcm_samples))
     track = encode_track(song, loop=max_orders is None)
     cells = sum(1 for pattern in patterns for row in pattern for cell in row if cell != Cell())
     return track, {
         "title": module.title, "channels": module.channels, "orders": order_count,
         "patterns": len(patterns), "instruments": len(song.instruments),
+        "waves": len(song.waves), "pcm_samples": len(song.pcm_samples),
+        "pcm_bytes": sum(len(sample.data) for sample in song.pcm_samples),
         "semantic_cells": cells, "track_bytes": len(track),
     }

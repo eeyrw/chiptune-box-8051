@@ -2,11 +2,11 @@ import struct
 
 import pytest
 
-from tools.tracker10.format import (ENV_ENABLED, ENV_SUSTAIN, Cell, Instrument,
-                                    Song, decode_track, encode_track,
+from tools.tracker10.format import (ENV_ENABLED, ENV_SUSTAIN, MODE_PCM_BASE,
+                                    Cell, Instrument, PcmSample, Song, decode_track, encode_track,
                                     inspect_track, pack_playlist)
 from tools.tracker10.reference import ReferencePlayer
-from tools.tracker10.xm import XmError, compile_xm, parse_xm
+from tools.tracker10.xm import XmError, _instrument_note_counts, compile_xm, parse_xm
 
 
 def simple_song() -> Song:
@@ -16,7 +16,7 @@ def simple_song() -> Song:
     second = list(empty)
     second[0] = Cell(effect=4, parameter=0)
     pattern = (tuple(first), tuple(second), empty)
-    instrument = Instrument(mode=1, gain=24, relative_pitch=-32,
+    instrument = Instrument(mode=0, gain=24, relative_pitch=-32,
                             volume_macro=(32, 20, 0), volume_flags=ENV_ENABLED,
                             pitch_macro=(8, 0), pitch_loop=0xFF)
     return Song((0, 0, 0), 1, 3, 125, (pattern,), (instrument,))
@@ -26,9 +26,10 @@ def test_semantic_track_playlist_and_crc():
     track = encode_track(simple_song())
     image = pack_playlist([track])
     info = inspect_track(track)
-    assert track[:6] == b"T10M\x03\x0a"
-    assert image[:5] == b"T10P\x03"
+    assert track[:6] == b"T10M\x04\x0a"
+    assert image[:5] == b"T10P\x04"
     assert info == {"orders": 3, "patterns": 1, "instruments": 1,
+                    "waves": 1, "pcm_samples": 0, "pcm_bytes": 0,
                     "cells": 2, "nonempty_rows": 2, "track_bytes": len(track)}
     assert decode_track(track) == simple_song()
 
@@ -54,6 +55,39 @@ def test_macro_validation():
     with pytest.raises(ValueError, match="volume macro"):
         encode_track(Song(song.orders, song.restart, song.speed, song.bpm,
                           song.patterns, (bad,)))
+
+
+def test_song_waves_and_pcm_are_self_contained():
+    song = simple_song()
+    pcm = PcmSample(bytes((0x80, 0x00, 0x7F)))
+    instruments = song.instruments + (Instrument(mode=MODE_PCM_BASE, gain=31),)
+    enriched = Song(song.orders, song.restart, song.speed, song.bpm, song.patterns,
+                    instruments, song.amiga_effects, song.waves, (pcm,))
+    decoded = decode_track(encode_track(enriched))
+    assert decoded.waves == song.waves
+    assert decoded.pcm_samples == (pcm,)
+    assert decoded.instruments[-1].mode == MODE_PCM_BASE
+
+
+def test_reference_emits_pcm_trigger_without_tonal_voice():
+    empty = (Cell(),) * 10
+    row = list(empty)
+    row[0] = Cell(note=49, instrument=1, volume=65)
+    song = Song((0,), 0, 1, 125, ((tuple(row),),),
+                (Instrument(mode=MODE_PCM_BASE, gain=31),),
+                pcm_samples=(PcmSample(bytes((0, 1, 2))),))
+    frame = ReferencePlayer(song).step()
+    assert frame.pcm_triggers == ((0, 31),)
+    assert frame.voices[0].volume == 0
+
+
+def test_reference_preserves_same_sample_simultaneous_pcm_triggers():
+    row = [Cell() for _ in range(10)]
+    row[0] = row[1] = Cell(note=49, instrument=1, volume=65)
+    song = Song((0,), 0, 1, 125, ((tuple(row),),),
+                (Instrument(mode=MODE_PCM_BASE, gain=31),),
+                pcm_samples=(PcmSample(bytes((0, 1, 2))),))
+    assert ReferencePlayer(song).step().pcm_triggers == ((0, 31), (0, 31))
 
 
 def minimal_xm(effect: int = 0, parameter: int = 0) -> bytes:
@@ -115,6 +149,21 @@ def test_unsupported_effect_fails_instead_of_sounding_wrong():
     module = parse_xm(minimal_xm(5, 1))
     with pytest.raises(XmError, match="unsupported effect"):
         compile_xm(module)
+
+
+def test_xm_note_statistics_follow_instrument_memory_and_order_reuse():
+    module = parse_xm(minimal_xm())
+    first = list(module.patterns[0][0])
+    first[0] = Cell(note=49, instrument=1)
+    continuation = list(first)
+    continuation[0] = Cell(note=61)
+    pattern = (tuple(first), tuple(continuation))
+    module = type(module)(module.title, (0, 0), module.restart, module.channels,
+                          module.speed, module.bpm, (pattern,), module.instruments,
+                          module.linear_frequency)
+    counts = _instrument_note_counts(module, module.orders)
+    assert counts[0][49] == 2
+    assert counts[0][61] == 2
 
 
 def test_reference_vm_keeps_vibrato_parameter_memory():

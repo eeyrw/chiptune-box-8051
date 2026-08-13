@@ -88,12 +88,13 @@ static void dispatch(void)
 {
     uint8_t data[84];
     uint8_t i,j;
+    uint16_t pcmActive;
     uint32_t now;
     int16_t mix;
     PlatformIrqState irq;
     switch(pkt_cmd) {
     case CMD_PING: {
-        const char *s="TRACKER10-8051 v0.3";
+        const char *s="TRACKER10-8051 v0.4";
         for(i=0;s[i];i++) data[i]=(uint8_t)s[i];
         respond(pkt_cmd,STATUS_OK,data,i); break;
     }
@@ -108,11 +109,17 @@ static void dispatch(void)
     case CMD_MEM_INFO:
         data[0]=SP; data[1]=0xff-SP; data[2]=0; data[3]=0; respond(pkt_cmd,STATUS_OK,data,4); break;
     case CMD_AUDIO_INFO:
-        Platform_IrqSave(irq); mix=wavetableSynth.mixOut; Platform_IrqRestore(irq);
+        Platform_IrqSave(irq); mix=wavetableSynth.mixOut;
         data[0]=mix; data[1]=mix>>8; data[2]=wavetableSynth.pwmSample;
-        data[3]=trackerQueue.underruns; data[4]=trackerQueue.head; data[5]=trackerQueue.tail;
+        data[3]=audioUnderruns; data[4]=audioRead; data[5]=audioWrite;
         data[6]=wavetableSynth.muteMask; data[7]=wavetableSynth.muteMask>>8;
-        respond(pkt_cmd,STATUS_OK,data,8); break;
+        pcmActive=0;
+        for(i=0;i<WT_VOICE_COUNT;i++) if(wavetableSynth.voice[i].volume&0x80)
+            pcmActive|=(uint16_t)1<<i;
+        data[8]=pcmActive; data[9]=pcmActive>>8;
+        wavetableSynth.muteMask &= 0x03FF;
+        Platform_IrqRestore(irq);
+        respond(pkt_cmd,STATUS_OK,data,10); break;
     case CMD_ADC_READ:
         if(pkt_len!=1) error(pkt_cmd,STATUS_BAD_LEN);
         else { uint16_t v=Get_ADCResult(pkt_data[0]); data[0]=v>>8; data[1]=v; respond(pkt_cmd,STATUS_OK,data,2); } break;
@@ -137,7 +144,7 @@ static void dispatch(void)
         data[8]=mainPlayer.vm.tick; data[9]=mainPlayer.vm.speed;
         respond(pkt_cmd,STATUS_OK,data,10); break;
     case CMD_FORMAT_INFO:
-        data[0]='T';data[1]='1';data[2]='0';data[3]='M';data[4]=3;data[5]=WT_VOICE_COUNT;data[6]=0x00;data[7]=0x7d;
+        data[0]='T';data[1]='1';data[2]='0';data[3]='M';data[4]=4;data[5]=WT_VOICE_COUNT;data[6]=0x00;data[7]=0x7d;
         respond(pkt_cmd,STATUS_OK,data,8); break;
     case CMD_CHANNEL_MUTE:
         if(pkt_len!=2 || (pkt_data[1]&0xfc)) error(pkt_cmd,STATUS_INVALID_PARAM);

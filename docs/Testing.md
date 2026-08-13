@@ -8,7 +8,7 @@ make clean && make
 ```
 
 The link report must keep the absolute synthesizer state at DATA `0x21`, leave
-the stack beginning at `0x76`, and stay within 64 KiB code / 3 KiB XRAM.
+the stack beginning at `0x7B`, and stay within 64 KiB code / 3 KiB XRAM.
 
 Hardware smoke test:
 

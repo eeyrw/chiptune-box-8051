@@ -70,6 +70,7 @@ ASM_SRC =
 ASM_SRC   += WavetableSynth/WavetableSynthAsm.s
 ASM_SRC   += WavetableSynth/WavetableSynthStep.s
 ASM_SRC   += WavetableSynth/PeriodTimer.s
+ASM_SRC   += WavetableSynth/AudioRender.s
 
 INC_DIR  = $(patsubst %, -I%, $(INCLUDE_DIRS))
 AS_INC   = $(INC_DIR)
@@ -117,6 +118,7 @@ ifneq ($(MAKECMDGOALS),clean)
 WavetableSynth/PeriodTimer.rel: WavetableSynth/WavetableSynth.inc WavetableSynth/8051.inc WavetableSynth/UpdateTick.inc
 WavetableSynth/WavetableSynthAsm.rel: WavetableSynth/WavetableSynth.inc
 WavetableSynth/WavetableSynthStep.rel: WavetableSynth/WavetableSynth.inc
+WavetableSynth/AudioRender.rel: WavetableSynth/WavetableSynth.inc
 endif
 
 

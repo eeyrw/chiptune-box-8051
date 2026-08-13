@@ -2,36 +2,62 @@
     .include "8051.inc"
     .module TRACKER_PERIOD_TIMER
     .globl _timer_isr
-    .globl _TrackerPlayerSampleTick
-    .globl _WavetableSynthStep
-    .area REG_BANK_1 (REL,OVR,DATA)
+    .globl _audioBuffer
+    .globl _audioRead
+    .globl _audioWrite
+    .globl _audioUnderruns
+    .area REG_BANK_2 (REL,OVR,DATA)
     .ds 8
     .area CSEG (CODE)
 _timer_isr:
-    ar7=0x0f
-    ar6=0x0e
-    ar5=0x0d
-    ar4=0x0c
-    ar3=0x0b
-    ar2=0x0a
-    ar1=0x09
-    ar0=0x08
+    ar0=0x10
     push acc
     push b
     push dpl
     push dph
     push psw
-    mov psw,#0x08
+    mov psw,#0x10
     setb P55
-    lcall _TrackerPlayerSampleTick
-    lcall _WavetableSynthStep
+    mov dptr,#_audioRead
+    movx a,@dptr
+    mov r0,a
+    mov dptr,#_audioWrite
+    movx a,@dptr
+    xrl a,r0
+    jz audio_empty$
+    mov dptr,#_audioBuffer
+    mov a,dpl
+    add a,r0
+    mov dpl,a
+    clr a
+    addc a,dph
+    mov dph,a
+    movx a,@dptr
+    push acc
+    mov dptr,#_audioRead
+    mov a,r0
+    inc a
+    movx @dptr,a
+    pop acc
+    sjmp audio_output$
+audio_empty$:
+    mov dptr,#_audioUnderruns
+    movx a,@dptr
+    inc a
+    movx @dptr,a
+    mov a,#128
+audio_output$:
+    mov r0,a
     mov dptr,#REG_PWMA_CCR2H
     clr a
     movx @dptr,a
     mov dptr,#REG_PWMA_CCR2L
-    mov a,(WT_SYNTH_ABS_ADDR + WT_PWM_OFFSET)
+    mov a,r0
     movx @dptr,a
     .include "UpdateTick.inc"
+    jnb TF0,timer_on_time$
+    orl (WT_SYNTH_ABS_ADDR + WT_MUTE_OFFSET + 1),#0x80
+timer_on_time$:
     clr P55
     pop psw
     pop dph

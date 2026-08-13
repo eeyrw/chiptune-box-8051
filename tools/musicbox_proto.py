@@ -129,12 +129,19 @@ class Tracker10Client:
         print(f"Free stack: {free} bytes")
 
     def audio(self) -> None:
-        values = struct.unpack("BBBBBBBB", self.command(CMD_AUDIO_INFO))
+        data = self.command(CMD_AUDIO_INFO)
+        values = struct.unpack("BBBBBBBB", data[:8])
         mix = struct.unpack("<h", bytes(values[:2]))[0]
-        muted = values[6] | values[7] << 8
+        state = values[6] | values[7] << 8
+        muted = state & 0x03FF
         print(f"Mix/PWM:    {mix:+d} / {values[2]}")
         print(f"Muted:      {muted:#05x}")
-        print(f"Queue:      head={values[4]} tail={values[5]} underruns={values[3]}")
+        level = (values[5] - values[4]) & 0xFF
+        print(f"Buffer:     level={level}/255 read={values[4]} write={values[5]} underruns={values[3]}")
+        print(f"Diagnostics: clip={bool(state & 0x4000)} isr_overrun={bool(state & 0x8000)}")
+        if len(data) >= 10:
+            active, = struct.unpack_from("<H", data, 8)
+            print(f"PCM voices: {active:#05x}")
 
     def format_info(self) -> None:
         magic, version, channels, rate = struct.unpack("<4sBBH", self.command(CMD_FORMAT_INFO))

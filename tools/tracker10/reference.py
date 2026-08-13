@@ -4,7 +4,8 @@ from dataclasses import dataclass, field
 
 import math
 
-from .format import ENV_ENABLED, ENV_LOOP, ENV_SUSTAIN, Instrument, Song, VOICES
+from .format import (ENV_ENABLED, ENV_LOOP, ENV_SUSTAIN, MODE_NOISE_LONG,
+                     MODE_PCM_BASE, Instrument, Song, VOICES)
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,7 @@ class TickFrame:
     order: int
     row: int
     tick: int
+    pcm_triggers: tuple[tuple[int, int], ...] = ()
 
 
 @dataclass
@@ -177,6 +179,7 @@ class ReferencePlayer:
             self._row()
         self._effects()
         voices = []
+        pcm_triggers = []
         for channel in self.channels:
             instrument = channel.instrument
             pitch = channel.note + instrument.relative_pitch
@@ -195,7 +198,13 @@ class ReferencePlayer:
             volume = (level * instrument.volume_macro[channel.volume_position] + 16) >> 5
             if not channel.key_on:
                 volume = volume * channel.fadeout >> 16
-            voices.append(VoiceFrame(max(1, min(0xFFFF, pitch)), min(31, volume) if channel.gate else 0,
+            output_volume = min(31, volume) if channel.gate else 0
+            if MODE_PCM_BASE <= instrument.mode < MODE_NOISE_LONG:
+                trigger = (instrument.mode - MODE_PCM_BASE, output_volume)
+                if channel.reset and output_volume:
+                    pcm_triggers.append(trigger)
+                output_volume = 0
+            voices.append(VoiceFrame(max(1, min(0xFFFF, pitch)), output_volume,
                                      instrument.mode, channel.reset))
             channel.reset = False
             self._advance_volume(channel)
@@ -218,4 +227,5 @@ class ReferencePlayer:
                 self.order += 1
                 if self.order >= len(self.song.orders):
                     self.order = self.song.restart
-        return TickFrame(wait, tuple(voices), frame_order, frame_row, frame_tick)
+        return TickFrame(wait, tuple(voices), frame_order, frame_row, frame_tick,
+                         tuple(pcm_triggers))

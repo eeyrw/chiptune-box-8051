@@ -21,12 +21,21 @@ UART1 使用 115200 baud。请求帧为：
 | `02` | RESET | software reset into ISP |
 | `03` | UPTIME | u32 LE milliseconds |
 | `04` | MEM_INFO | SP and free stack |
-| `05` | AUDIO_INFO | mix, PWM, queue state, u16 mute mask |
+| `05` | AUDIO_INFO | mix, PWM, audio-buffer state, u16 state, u16 PCM voice mask |
 | `07` | VOICE_DUMP | 10 x 8-byte hot voice state |
 | `10..15` | PLAY/STOP/PREV/NEXT/SET/STATUS | playback control |
-| `17` | FORMAT_INFO | `T10M`, version `3`, channel count, rate |
+| `17` | FORMAT_INFO | `T10M`, version `4`, channel count, rate |
 | `18` | CHANNEL_MUTE | u16 LE, bits 0..9 |
 | `20..25` | FLASH commands | optional SPI NOR management |
+
+The AUDIO_INFO state word uses bits 0..9 as the mute mask. Bit 14 latches final
+mixer saturation and bit 15 latches a Timer0 ISR that crossed the next 32 kHz
+deadline. Reading AUDIO_INFO clears both diagnostic bits; they do not affect
+channel muting.
+
+AUDIO_INFO byte 3 is the audio-buffer underrun counter; bytes 4 and 5 are its
+8-bit read and write indices. `(write - read) & 0xff` is the buffered sample
+count in the 255-byte effective ring.
 
 SPI erase/write is rejected while playback is active. On boards without the
 SPI NOR populated, flash commands return `NOT_SUPPORTED` and playback uses the

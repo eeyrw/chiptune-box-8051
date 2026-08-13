@@ -89,6 +89,8 @@ typedef struct _TrackerVm {
     uint32_t trackSize;
     uint32_t patternDirectoryOffset;
     uint32_t instrumentOffset;
+    uint32_t resourceOffset;
+    uint32_t pcmDirectoryOffset;
     uint32_t timingRemainder;
     uint16_t orderCount;
     uint16_t restartOrder;
@@ -103,6 +105,8 @@ typedef struct _TrackerVm {
     uint8_t tick;
     uint8_t loop;
     uint8_t amigaEffects;
+    uint8_t waveCount;
+    uint8_t pcmCount;
     uint8_t pendingEnd;
     uint8_t status;
 } TrackerVm;

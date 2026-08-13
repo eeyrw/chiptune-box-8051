@@ -21,12 +21,15 @@ does not parse tracker effects in real time.
 ## Runtime
 
 - STC8H3K64S2: 64 KiB Flash, 256 B IRAM, 3 KiB internal XRAM.
-- 32 kHz Timer0 audio ISR, register bank 1.
+- 32 kHz Timer0 audio ISR uses register bank 2 and only consumes one byte from
+  the 256-byte XRAM audio ring.
 - Ten fixed voices, no dynamic voice allocation.
 - Hot state is absolute DATA `0x21`, 90 bytes; keep C and `.inc` layouts equal.
 - Each voice: phase24, increment24, volume8, prepacked waveform offset8.
-- `WavetableSynthStep.s` is the only synthesis hot path and is unrolled ten times.
-- Main loop runs effects, timed envelopes, release/fadeout and fills a four-entry XRAM queue.
+- `WavetableSynthStep.s` is the only synthesis hot path, is unrolled ten times,
+  and runs through `AudioRenderOne` in the main thread using register bank 1.
+- Main loop runs effects, timed envelopes, release/fadeout, fills a four-entry
+  control queue, and pre-renders a 255-sample effective audio ring.
 - Pitch conversion, effects and instrument state belong in the main loop, never ISR.
 
 Always `make clean` after changing `.inc` files because SDCC assembly dependency
@@ -38,8 +41,9 @@ tracking is manual.
 python3 tools/tracker10_tool.py compile song.xm song.t10p --c-output scoreList.c
 ```
 
-T10M v3 stores orders, patterns, row cells, timed envelopes, release/fadeout and
-the normalized pitch-effect model. The VM uses 8.8 note values and schedules
+T10M v4 stores orders, patterns, row cells, timed envelopes, release/fadeout,
+song wavetables, internal-Flash PCM one-shots and the normalized pitch-effect
+model. The VM uses 8.8 note values and schedules
 tracker ticks with an exact sample remainder. See `docs/T10Format.md`; do not
 reintroduce the v1 sample-timed event stream or the v2 40-byte instrument layout.
 
@@ -52,6 +56,10 @@ have no SPI NOR installed; that is not permission to remove the backend.
 PCB SPI data lines are crossed, so `SpiFlash.c` uses GPIO bit banging on P3.2
 (clock), P3.3 (MOSI), P3.4 (MISO), P3.5 (CS). Do not enable hardware SPI without
 physically swapping P3.3/P3.4.
+
+T10M v4 wavetable and PCM resources are an internal Code Flash feature. The ISR
+reads them directly with `MOVC`; do not add SPI reads, buffering or decoding to
+the audio hot path. Preserve the SPI backend source even though v4 rejects it.
 
 ## Hardware verification
 

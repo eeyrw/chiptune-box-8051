@@ -1,7 +1,13 @@
 #include <string.h>
 #include "WavetableSynth.h"
 
-MEM_CODE(int8_t) waveTables[WT_WAVE_COUNT * 16] = {
+MEM_XDATA(uint16_t) wavetableCodeBase;
+MEM_XDATA(uint8_t) audioBuffer[WT_AUDIO_BUFFER_SIZE];
+volatile MEM_XDATA(uint8_t) audioRead;
+volatile MEM_XDATA(uint8_t) audioWrite;
+volatile MEM_XDATA(uint8_t) audioUnderruns;
+
+MEM_CODE(int8_t) waveTables[8 * WT_WAVE_SIZE] = {
     /* square 50%, pulse 25%, pulse 12.5%, triangle */
      96, 96, 96, 96, 96, 96, 96, 96,-96,-96,-96,-96,-96,-96,-96,-96,
     112,112,112,112,-48,-48,-48,-48,-48,-48,-48,-48,-48,-48,-48,-48,
@@ -17,6 +23,7 @@ MEM_CODE(int8_t) waveTables[WT_WAVE_COUNT * 16] = {
 void WavetableSynthInit(void)
 {
     memset(&wavetableSynth, 0, sizeof(wavetableSynth));
+    wavetableCodeBase = (uint16_t)waveTables;
     wavetableSynth.pwmSample = 128;
     wavetableSynth.noiseLong = 0xACE1;
     wavetableSynth.noiseShort = 0x5D;
@@ -35,5 +42,29 @@ void WavetableSynthSilence(void)
 
 void WavetableSynthSetMuteMask(uint16_t mask)
 {
-    wavetableSynth.muteMask = mask & 0x03FF;
+    wavetableSynth.muteMask = (wavetableSynth.muteMask & 0xC000) | (mask & 0x03FF);
+}
+
+void AudioBufferInit(void)
+{
+    PlatformIrqState irq;
+    Platform_IrqSave(irq);
+    audioRead = audioWrite = audioUnderruns = 0;
+    Platform_IrqRestore(irq);
+}
+
+uint8_t AudioBufferLevel(void)
+{
+    return (uint8_t)(audioWrite - audioRead);
+}
+
+void AudioRenderProcess(void)
+{
+    uint8_t budget = 16;
+    uint8_t write = audioWrite;
+    while (budget-- && (uint8_t)(write - audioRead) != 0xFF) {
+        AudioRenderOne();
+        audioBuffer[write++] = wavetableSynth.pwmSample;
+        audioWrite = write;
+    }
 }

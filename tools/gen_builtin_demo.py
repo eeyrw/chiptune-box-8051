@@ -3,7 +3,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).parent))
-from tracker10.format import (ENV_ENABLED, Cell, Instrument, Song, emit_c,
+from tracker10.format import (ENV_ENABLED, MODE_NOISE_LONG, Cell, Instrument, Song, emit_c,
                               encode_track, pack_playlist)
 
 
@@ -20,10 +20,17 @@ for index, note in enumerate(notes):
 instruments = (
     Instrument(0, 18), Instrument(1, 18), Instrument(3, 18), Instrument(4, 16),
     Instrument(3, 18),
-    Instrument(6, 24, volume_macro=(32, 24, 14, 7, 2, 0),
+    Instrument(MODE_NOISE_LONG, 24, volume_macro=(32, 24, 14, 7, 2, 0),
                volume_flags=ENV_ENABLED),
 )
-song = Song((0,), 0, 6, 125, (tuple(rows),), instruments)
+waves = (
+    (96,) * 8 + (-96,) * 8,
+    (112,) * 4 + (-48,) * 12,
+    (120,) * 2 + (-24,) * 14,
+    (-112, -96, -80, -64, -48, -32, -16, 0, 16, 32, 48, 64, 80, 96, 112, 0),
+    (-120, -104, -88, -72, -56, -40, -24, -8, 8, 24, 40, 56, 72, 88, 104, 120),
+)
+song = Song((0,), 0, 6, 125, (tuple(rows),), instruments, waves=waves)
 image = pack_playlist([encode_track(song)])
 Path("scoreList.c").write_text(emit_c(image), encoding="ascii")
 print(f"generated {len(image)} bytes")

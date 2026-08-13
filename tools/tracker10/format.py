@@ -5,11 +5,20 @@ import zlib
 from dataclasses import dataclass
 
 RATE = 32000
+PCM_RATE = 8000
 VOICES = 10
 TRACK_HEADER_SIZE = 48
-VERSION = 3
+VERSION = 4
 INSTRUMENT_SIZE = 48
 PATTERN_DIR_SIZE = 8
+RESOURCE_HEADER_SIZE = 8
+PCM_ENTRY_SIZE = 8
+WAVE_SIZE = 16
+MAX_WAVES = 16
+
+MODE_PCM_BASE = 0x80
+MODE_NOISE_LONG = 0xFE
+MODE_NOISE_SHORT = 0xFF
 
 TRACK_LOOP = 0x01
 TRACK_AMIGA_EFFECTS = 0x02
@@ -50,6 +59,14 @@ class Instrument:
 
 
 @dataclass(frozen=True)
+class PcmSample:
+    data: bytes
+
+
+DEFAULT_WAVE = (96,) * 8 + (-96,) * 8
+
+
+@dataclass(frozen=True)
 class Song:
     orders: tuple[int, ...]
     restart: int
@@ -58,6 +75,8 @@ class Song:
     patterns: tuple[tuple[tuple[Cell, ...], ...], ...]
     instruments: tuple[Instrument, ...]
     amiga_effects: bool = False
+    waves: tuple[tuple[int, ...], ...] = (DEFAULT_WAVE,)
+    pcm_samples: tuple[PcmSample, ...] = ()
 
 
 def _encode_cell(cell: Cell) -> bytes:
@@ -104,8 +123,13 @@ def _encode_pattern(pattern: tuple[tuple[Cell, ...], ...]) -> bytes:
     return bytes(out)
 
 
-def _encode_instrument(instrument: Instrument) -> bytes:
-    if not 0 <= instrument.mode < 8 or not 0 <= instrument.gain <= 31:
+def _valid_mode(mode: int, wave_count: int, pcm_count: int) -> bool:
+    return (0 <= mode < wave_count or mode in (MODE_NOISE_LONG, MODE_NOISE_SHORT)
+            or MODE_PCM_BASE <= mode < MODE_PCM_BASE + pcm_count)
+
+
+def _encode_instrument(instrument: Instrument, wave_count: int, pcm_count: int) -> bytes:
+    if not _valid_mode(instrument.mode, wave_count, pcm_count) or not 0 <= instrument.gain <= 31:
         raise ValueError("invalid instrument mode or gain")
     volume = tuple(instrument.volume_macro)
     pitch = tuple(instrument.pitch_macro)
@@ -155,12 +179,37 @@ def encode_track(song: Song, loop: bool = True) -> bytes:
         raise ValueError("invalid restart or speed")
     if not 32 <= song.bpm <= 999:
         raise ValueError("invalid BPM")
+    if not 1 <= len(song.waves) <= MAX_WAVES:
+        raise ValueError("invalid wavetable count")
+    if len(song.pcm_samples) > MODE_NOISE_LONG - MODE_PCM_BASE:
+        raise ValueError("too many PCM samples")
+    for wave in song.waves:
+        if len(wave) != WAVE_SIZE or any(not -128 <= value <= 127 for value in wave):
+            raise ValueError("wavetable must contain sixteen signed bytes")
+    for sample in song.pcm_samples:
+        if not sample.data or len(sample.data) > 0xFFFF:
+            raise ValueError("PCM sample length is outside 1..65535")
 
     encoded_patterns = [_encode_pattern(pattern) for pattern in song.patterns]
     orders_offset = TRACK_HEADER_SIZE
     pattern_dir_offset = orders_offset + len(song.orders)
     instrument_dir_offset = pattern_dir_offset + len(song.patterns) * PATTERN_DIR_SIZE
-    data_offset = instrument_dir_offset + len(song.instruments) * INSTRUMENT_SIZE
+    resource_offset = instrument_dir_offset + len(song.instruments) * INSTRUMENT_SIZE
+
+    wave_data = b"".join(bytes(value & 0xFF for value in wave) for wave in song.waves)
+    pcm_data_offset = (resource_offset + RESOURCE_HEADER_SIZE + len(wave_data)
+                       + len(song.pcm_samples) * PCM_ENTRY_SIZE)
+    pcm_directory = bytearray()
+    pcm_data = bytearray()
+    cursor = pcm_data_offset
+    for sample in song.pcm_samples:
+        pcm_directory += struct.pack("<IHH", cursor, len(sample.data), 0)
+        pcm_data += sample.data
+        cursor += len(sample.data)
+    resource_data = (struct.pack("<4sBBH", b"T10R", len(song.waves),
+                                 len(song.pcm_samples), PCM_RATE)
+                     + wave_data + bytes(pcm_directory) + bytes(pcm_data))
+    data_offset = resource_offset + len(resource_data)
 
     pattern_dir = bytearray()
     pattern_data = bytearray()
@@ -170,8 +219,9 @@ def encode_track(song: Song, loop: bool = True) -> bytes:
         pattern_data += encoded
         cursor += len(encoded)
 
-    instrument_data = b"".join(_encode_instrument(x) for x in song.instruments)
-    body = (bytes(song.orders) + bytes(pattern_dir) + instrument_data +
+    instrument_data = b"".join(_encode_instrument(x, len(song.waves), len(song.pcm_samples))
+                               for x in song.instruments)
+    body = (bytes(song.orders) + bytes(pattern_dir) + instrument_data + resource_data +
             bytes(pattern_data))
     total_size = TRACK_HEADER_SIZE + len(body)
     header = struct.pack(
@@ -181,7 +231,7 @@ def encode_track(song: Song, loop: bool = True) -> bytes:
         orders_offset, len(song.orders), song.restart,
         pattern_dir_offset, len(song.patterns), len(song.instruments),
         instrument_dir_offset, total_size, zlib.crc32(body) & 0xFFFFFFFF,
-        song.speed, song.bpm, 0,
+        song.speed, song.bpm, resource_offset,
     )
     if len(header) != TRACK_HEADER_SIZE:
         raise AssertionError("T10M header layout changed")
@@ -215,7 +265,8 @@ def inspect_track(track: bytes) -> dict[str, int]:
     pattern_dir_offset, pattern_count, instrument_count = struct.unpack_from("<IHH", track, 20)
     instrument_offset, total_size, expected_crc = struct.unpack_from("<III", track, 28)
     speed, bpm = struct.unpack_from("<HH", track, 40)
-    if track[6] & ~(TRACK_LOOP | TRACK_AMIGA_EFFECTS) or track[7] or track[44:48] != b"\0\0\0\0":
+    resource_offset = struct.unpack_from("<I", track, 44)[0]
+    if track[6] & ~(TRACK_LOOP | TRACK_AMIGA_EFFECTS) or track[7]:
         raise ValueError("invalid T10M flags or reserved bytes")
     if total_size != len(track) or zlib.crc32(track[TRACK_HEADER_SIZE:]) & 0xFFFFFFFF != expected_crc:
         raise ValueError("track size or CRC mismatch")
@@ -225,12 +276,28 @@ def inspect_track(track: bytes) -> dict[str, int]:
         raise ValueError("invalid pattern directory")
     if instrument_offset + instrument_count * INSTRUMENT_SIZE > len(track):
         raise ValueError("invalid instrument table")
+    if resource_offset + RESOURCE_HEADER_SIZE > len(track) or track[resource_offset:resource_offset + 4] != b"T10R":
+        raise ValueError("invalid resource header")
+    wave_count, pcm_count, pcm_rate = struct.unpack_from("<BBH", track, resource_offset + 4)
+    if not 1 <= wave_count <= MAX_WAVES or pcm_rate != PCM_RATE:
+        raise ValueError("invalid resource metadata")
+    wave_offset = resource_offset + RESOURCE_HEADER_SIZE
+    pcm_directory_offset = wave_offset + wave_count * WAVE_SIZE
+    if pcm_directory_offset + pcm_count * PCM_ENTRY_SIZE > len(track):
+        raise ValueError("invalid PCM directory")
+    pcm_samples: list[bytes] = []
+    for index in range(pcm_count):
+        offset = pcm_directory_offset + index * PCM_ENTRY_SIZE
+        data_offset, length, reserved = struct.unpack_from("<IHH", track, offset)
+        if reserved or not length or data_offset + length > len(track):
+            raise ValueError("invalid PCM sample range")
+        pcm_samples.append(track[data_offset:data_offset + length])
     for index in range(instrument_count):
         offset = instrument_offset + index * INSTRUMENT_SIZE
         (mode, gain, _relative, volume_len, volume_step, volume_flags,
          sustain, loop_start, loop_end, pitch_len, pitch_loop,
          _fadeout) = struct.unpack_from("<BBhBBBBBBBBH", track, offset)
-        if mode >= 8 or gain > 31 or not 1 <= volume_len <= 16 or not volume_step:
+        if not _valid_mode(mode, wave_count, pcm_count) or gain > 31 or not 1 <= volume_len <= 16 or not volume_step:
             raise ValueError("invalid instrument header")
         if volume_flags & ~0x07 or not 1 <= pitch_len <= 16:
             raise ValueError("invalid instrument macro metadata")
@@ -285,6 +352,8 @@ def inspect_track(track: bytes) -> dict[str, int]:
         if pos != offset + size:
             raise ValueError("pattern has trailing data")
     return {"orders": order_count, "patterns": pattern_count, "instruments": instrument_count,
+            "waves": wave_count, "pcm_samples": pcm_count,
+            "pcm_bytes": sum(len(sample) for sample in pcm_samples),
             "cells": cells, "nonempty_rows": nonempty_rows, "track_bytes": len(track)}
 
 
@@ -294,6 +363,20 @@ def decode_track(track: bytes) -> Song:
     pattern_dir_offset, pattern_count, instrument_count = struct.unpack_from("<IHH", track, 20)
     instrument_offset = struct.unpack_from("<I", track, 28)[0]
     speed, bpm = struct.unpack_from("<HH", track, 40)
+    resource_offset = struct.unpack_from("<I", track, 44)[0]
+    wave_count, pcm_count, _pcm_rate = struct.unpack_from("<BBH", track, resource_offset + 4)
+    wave_offset = resource_offset + RESOURCE_HEADER_SIZE
+    waves = []
+    for index in range(wave_count):
+        offset = wave_offset + index * WAVE_SIZE
+        waves.append(tuple(value - 256 if value & 0x80 else value
+                           for value in track[offset:offset + WAVE_SIZE]))
+    pcm_directory_offset = wave_offset + wave_count * WAVE_SIZE
+    pcm_samples = []
+    for index in range(pcm_count):
+        offset = pcm_directory_offset + index * PCM_ENTRY_SIZE
+        data_offset, length = struct.unpack_from("<IH", track, offset)
+        pcm_samples.append(PcmSample(track[data_offset:data_offset + length]))
     instruments = []
     for index in range(instrument_count):
         offset = instrument_offset + index * INSTRUMENT_SIZE
@@ -340,4 +423,5 @@ def decode_track(track: bytes) -> Song:
         patterns.append(tuple(pattern))
     flags = track[6]
     return Song(tuple(track[order_offset:order_offset + order_count]), restart, speed, bpm,
-                tuple(patterns), tuple(instruments), bool(flags & TRACK_AMIGA_EFFECTS))
+                tuple(patterns), tuple(instruments), bool(flags & TRACK_AMIGA_EFFECTS),
+                tuple(waves), tuple(pcm_samples))
