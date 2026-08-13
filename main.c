@@ -23,7 +23,7 @@ void main()
 	while (1)
 	{
 		TrackerPlayerProcess(&mainPlayer);
-		AudioRenderProcess();
+		VisualizeSound(AudioRenderProcess());
 		Proto_Process();
 	}
 }

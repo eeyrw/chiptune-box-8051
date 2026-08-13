@@ -1,8 +1,8 @@
 # XM 曲库来源与筛选记录
 
 本文记录第三方 XM 从哪里找、怎样下载、怎样判断能否在 Tracker10 上完整播放。
-源码仓库不收录第三方 XM/T10P；本机工作副本放在
-`/home/yuan/下载/tracker10-xm-compatible-20260813/`。
+仓库内的可复现工作副本放在 `music/xm/`。其中第三方作品的版权和再分发边界见
+`music/xm/README.md`；收录用于兼容性测试，不代表作品进入公有领域。
 
 ## 来源
 
@@ -17,8 +17,8 @@
 - `.mod Sample Master`：用文件名、MD5 和 instances 交叉索引候选。它适合反查，
   最终下载 URL 和许可仍回到实际镜像或模块页记录。
 
-没有明确再分发许可的文件只保存在本机测试目录，不提交到本仓库。来源站允许下载
-不等于作品版权进入公有领域；清单必须保留来源 URL 和站点 license 字段。
+来源站允许下载不等于作品版权进入公有领域；清单保留来源 URL、哈希和已知的许可
+信息。没有明确许可的文件仍属于各自作者，仓库收录不附加新的使用授权。
 
 ## 查找方法
 
@@ -77,9 +77,9 @@ column 或损坏资源；生成完整且 CRC 有效的 T10P；最终 clean link 
 对 Modland 的 Cerror、Dalezy、Dubmood 共 390 首本地 XM 重扫：加入 `Bxx/Dxx`
 控制流、`ECx` note cut、volume-column `6x/7x` lowering，并对 `6xy`、`9xx`、
 `EDx`、volume-column `8x/9x` 作明确告警的有损近似后，转换通过数从 28 提升到
-152；按当前 29,444 字节固定固件开销计算，143 首可单独链接，9 首因 T10P 过大
-排除。收集目录的 `MANIFEST.tsv` 保存逐首结果、warning、哈希和 URL。
-加上单独收录的 JAM、Super Mario 2 和 Traven Tetris high scores，当前本机集合共
+152；按当前 29,712 字节固定固件开销计算，143 首可单独链接，9 首因 T10P 过大
+排除。`music/xm/MANIFEST.tsv` 保存逐首结果、warning、哈希和 URL。
+加上单独收录的 JAM、Super Mario 2 和 Traven Tetris high scores，当前集合共
 146 对 XM/T10P：13 首 `exact`，133 首 `approximate`；全部通过 fresh compile
 逐字节比对和 SHA-256 校验。
 

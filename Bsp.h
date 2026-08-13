@@ -60,6 +60,7 @@
 
 void HardwareInit(void);
 void StartAudioOutput(void);
+void VisualizeSound(uint8_t peak);
 uint32_t GetSysMs(void);
 uint16_t Get_ADCResult(uint8_t channel);
 

@@ -113,6 +113,11 @@ The write index advances only after a sample byte is complete; Timer0 owns the
 read index. Timer0 uses register bank 2, while `AudioRenderOne` temporarily uses
 bank 1, so an interrupt can safely preempt rendering.
 
+The same main-thread render batch reports its peak distance from PWM center.
+`VisualizeSound` applies immediate attack and a millisecond-based decay, then
+drives the board LED on PWM4N/P1.7. This visualization never runs in Timer0 and
+does not add work to the 32 kHz ISR.
+
 ## Synthesis state
 
 Each fixed voice occupies eight absolute DATA bytes:
@@ -169,8 +174,8 @@ build uses:
 
 | Resource | Used | Available |
 |---|---:|---:|
-| program Flash | 59,223 bytes | 65,024-byte programmed region |
-| XRAM | 2,880 bytes | 3,072 bytes |
+| program Flash | 59,491 bytes | 65,024-byte programmed region |
+| XRAM | 2,885 bytes | 3,072 bytes |
 | absolute DATA hot state | 90 bytes | fixed at `0x21` |
 | stack | 133 bytes | starts at `0x7B` |
 | T10P score image | 29,779 bytes | internal Code Flash |

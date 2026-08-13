@@ -90,7 +90,8 @@ def write_tsv(path: Path, rows: list[dict[str, object]]) -> None:
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", dir=path.parent,
                                      prefix=f".{path.name}.", delete=False) as output:
         temporary = Path(output.name)
-        writer = csv.DictWriter(output, FIELDS, delimiter="\t", extrasaction="ignore")
+        writer = csv.DictWriter(output, FIELDS, delimiter="\t", extrasaction="ignore",
+                                lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
     os.replace(temporary, path)

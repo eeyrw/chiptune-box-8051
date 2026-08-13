@@ -174,6 +174,26 @@ void StartAudioOutput(void)
     ET0 = 1;
 }
 
+void VisualizeSound(uint8_t peak)
+{
+    static MEM_XDATA(uint32_t) lastDecayMs;
+    static MEM_XDATA(uint8_t) level;
+    uint32_t now = GetSysMs();
+    uint32_t elapsed = now - lastDecayMs;
+    uint8_t decay;
+    uint16_t duty;
+
+    if (peak > level) level = peak;
+    if (elapsed >= 4) {
+        decay = elapsed >= 1020 ? 255 : (uint8_t)(elapsed >> 2);
+        level = decay >= level ? 0 : level - decay;
+        lastDecayMs = now;
+    }
+    duty = (uint16_t)level << 1;
+    PWMA_CCR4H = duty >> 8;
+    PWMA_CCR4L = duty;
+}
+
 //========================================================================
 // 函数: void	ADC_Inilize(ADC_InitTypeDef *ADCx)
 // 描述: ADC初始化程序.

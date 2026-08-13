@@ -46,6 +46,8 @@ make flash-xm TRACKER_INPUT="song.xm" \
 的 `scoreList.c`，单独生成 `.t10p` 不会更换板上曲目。
 互联网 XM 的来源、检索方法、批量筛选标准和 2026-08-13 收集结果见
 [docs/XMCollection.md](docs/XMCollection.md)。
+可复现兼容曲库保存在 [`music/xm/`](music/xm/)，包括 146 对 XM/T10P、来源
+manifest、转换 warning 和 SHA-256；第三方版权说明见该目录 README。
 
 ## Runtime
 
