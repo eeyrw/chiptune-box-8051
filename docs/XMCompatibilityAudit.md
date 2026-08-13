@@ -226,11 +226,13 @@ This is appropriate for chip-like periodic material but deliberately discards:
 - the non-looped attack before the loop;
 - timbral variation over a long loop;
 - sample interpolation behavior;
-- sample-relative tuning after waveform normalization.
+- sample-relative tuning after waveform reduction.
 
-The generated table is DC-centered and peak-normalized, so source sample volume
-is represented separately by instrument gain. The autocorrelation period search
-is heuristic and needs golden waveform tests.
+The generated table retains the selected source sample amplitudes without DC
+centering or peak normalization. XM sample defaults, channel volume and volume
+envelopes are linear amplitude quantities. A sample default initializes channel
+volume on an instrument event; it is not a permanent multiplier. The
+autocorrelation period search remains heuristic and needs golden waveform tests.
 
 ### 6.2 PCM classification
 
@@ -309,10 +311,11 @@ audio-ring underruns, no ISR overrun and no final saturation.
 The ten-lane mixer uses a 24-bit accumulator and shifts by ten before signed
 8-bit saturation. Tonal control gain is 7-bit, so its full-scale gain equals the
 older 5-bit/shift-by-eight design while retaining two extra quiet-volume bits.
-PCM is multiplied by 1.5 and mapped into the same gain domain before accumulation. A previous 2x
-experiment clipped; 1.5x did not. Global RMS normalization and a PCM-body
-attenuation experiment both made drums too light or failed to remove the
-reported sensation. Those experiments are rejected as general format policy.
+PCM's five-bit control is multiplied by four to map it into the same seven-bit
+linear gain domain before accumulation. It receives no additional type-specific
+gain. Earlier 1.5x and 2x PCM experiments, global RMS normalization and PCM-body
+attenuation are rejected as general format policy because they alter the
+module's authored balance.
 
 The underrun diagnostic is an 8-bit counter. STOP empties the audio ring while
 Timer0 continues consuming silence, so the counter can increase between test

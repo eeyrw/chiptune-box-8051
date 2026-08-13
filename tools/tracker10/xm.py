@@ -277,10 +277,9 @@ def _wave_table(sample: XmSample) -> tuple[int, ...]:
         period = min(lag for error, lag in errors if error <= best * 1.05 + 1e-9)
         source = source[:period]
     points = [source[min(len(source) - 1, index * len(source) // 16)] for index in range(16)]
-    mean = sum(points) / 16.0
-    centered = [value - mean for value in points]
-    peak = max(abs(value) for value in centered) or 1.0
-    return tuple(max(-120, min(120, round(value * 120.0 / peak))) for value in centered)
+    # XM sample values and all volume controls are linear amplitudes. Keep the
+    # selected values verbatim; centering or peak normalization changes balance.
+    return tuple(points)
 
 
 def _pcm_sample(sample: XmSample, note: int) -> PcmSample:
@@ -305,13 +304,7 @@ def _pcm_sample(sample: XmSample, note: int) -> PcmSample:
             weight_sum += weight
         output.append(max(-128, min(127, round(value / weight_sum if weight_sum else 0.0))))
         position += source_step
-    # Remove source DC offline. Preserve the sample's original dynamics; PCM
-    # balance is an arrangement/mixer concern, not a normalization target.
-    if output:
-        mean = sum(output) / len(output)
-        centered = [value - mean for value in output]
-        output = [max(-128, min(127, round(value))) & 0xFF
-                  for value in centered]
+    output = [value & 0xFF for value in output]
     # A one-shot ending away from zero clicks when the fixed voice becomes
     # silent. Smooth only the last 4 ms offline; the MCU keeps a branch-free
     # end-of-sample transition and the encoded length does not change.
@@ -333,10 +326,13 @@ def _compile_instrument(instrument: XmInstrument, note: int
     sample_index = instrument.keymap[max(0, min(95, note - 1))] if instrument.keymap else 0
     sample = instrument.samples[min(sample_index, len(instrument.samples) - 1)]
     # relative_note and finetune calibrate the source sample's recorded pitch.
-    # T10 replaces that sample with a normalized one-cycle oscillator, so carrying
+    # T10 replaces that sample with a reduced one-cycle oscillator, so carrying
     # the calibration across would transpose the musical note a second time.
     relative_pitch = 0
-    gain = max(1, min(31, round(sample.volume * 31 / 64)))
+    # In FT2 the sample default volume initializes channel volume when the
+    # instrument is selected. It is not a permanent multiplier. The compiler
+    # lowers that initialization into pattern cells, leaving mixer gain at unity.
+    gain = 31
     if sample.loop_type and sample.loop_length >= 8:
         volume, step, flags, sustain, loop_start, loop_end = _xm_envelope(instrument)
         return (Instrument(gain=gain, relative_pitch=relative_pitch,
@@ -410,6 +406,17 @@ def _instrument_note_counts(module: XmModule, orders: tuple[int, ...]) -> list[C
     return counts
 
 
+def _has_terminal_restart_sentinel(module: XmModule) -> bool:
+    if module.restart != len(module.orders) - 1:
+        return False
+    pattern_index = module.orders[module.restart]
+    if module.orders.count(pattern_index) != 1:
+        return False
+    return not any(cell.note or cell.instrument or cell.volume
+                   or (cell.effect != 0x0F and (cell.effect or cell.parameter))
+                   for row in module.patterns[pattern_index] for cell in row)
+
+
 def analyze_xm(module: XmModule) -> dict:
     effects: Counter[str] = Counter()
     volume_commands: Counter[str] = Counter()
@@ -459,6 +466,8 @@ def analyze_xm(module: XmModule) -> dict:
         warnings.append("multisample instruments use only the sample mapped by their most common note")
     if instrument_only:
         warnings.append(f"{instrument_only} instrument-only cells use reduced Tracker10 semantics")
+    if _has_terminal_restart_sentinel(module):
+        warnings.append("empty final restart pattern is treated as a one-shot ending")
 
     return {
         "title": module.title,
@@ -483,6 +492,17 @@ def compile_xm(module: XmModule, max_orders: int | None = None) -> tuple[bytes, 
         raise XmError("max-orders must be at least one")
     order_count = len(module.orders) if max_orders is None else min(max_orders, len(module.orders))
     selected_orders = module.orders[:order_count]
+    terminal_sentinel = max_orders is None and _has_terminal_restart_sentinel(module)
+    terminal_pattern = module.orders[module.restart] if terminal_sentinel else -1
+    note_counts = _instrument_note_counts(module, selected_orders)
+    default_volumes = []
+    for index, source in enumerate(module.instruments):
+        note = note_counts[index].most_common(1)[0][0] if note_counts[index] else 49
+        if not source.samples:
+            default_volumes.append(0)
+            continue
+        sample_index = source.keymap[max(0, min(95, note - 1))] if source.keymap else 0
+        default_volumes.append(source.samples[min(sample_index, len(source.samples) - 1)].volume)
     used_patterns: list[int] = []
     for pattern in selected_orders:
         if pattern not in used_patterns:
@@ -498,6 +518,12 @@ def compile_xm(module: XmModule, max_orders: int | None = None) -> tuple[bytes, 
                     raise XmError(f"unknown instrument {cell.instrument} at "
                                   f"{source_index}:{row_index}:{channel}")
                 normalized = _normalize_cell(cell, source_index, row_index, channel)
+                if (normalized.instrument and not normalized.volume
+                        and (not normalized.note
+                             or default_volumes[normalized.instrument - 1] != 64)):
+                    normalized = Cell(normalized.note, normalized.instrument,
+                                      default_volumes[normalized.instrument - 1] + 1,
+                                      normalized.effect, normalized.parameter)
                 if normalized.effect == 0x0B and normalized.parameter >= order_count:
                     raise XmError(
                         f"position jump B{normalized.parameter:02X} exceeds {order_count} orders "
@@ -512,12 +538,14 @@ def compile_xm(module: XmModule, max_orders: int | None = None) -> tuple[bytes, 
                                       f"{source_index}:{row_index}:{channel}")
                 row.append(normalized)
             row.extend(Cell() for _ in range(10 - len(row)))
+            if source_index == terminal_pattern and row_index == 0:
+                row = [Cell(note=97, effect=cell.effect, parameter=cell.parameter)
+                       for cell in row]
             normalized_rows.append(tuple(row))
         patterns.append(tuple(normalized_rows))
     restart = 0
     if max_orders is None or max_orders > module.restart:
         restart = min(module.restart, order_count - 1)
-    note_counts = _instrument_note_counts(module, selected_orders)
     waves: list[tuple[int, ...]] = []
     pcm_samples: list[PcmSample] = []
     instruments = []
@@ -541,12 +569,13 @@ def compile_xm(module: XmModule, max_orders: int | None = None) -> tuple[bytes, 
     song = Song(tuple(pattern_map[x] for x in selected_orders), restart, module.speed, module.bpm,
                 tuple(patterns), tuple(instruments), amiga_effects=not module.linear_frequency,
                 waves=tuple(waves), pcm_samples=tuple(pcm_samples))
-    track = encode_track(song, loop=max_orders is None)
+    track = encode_track(song, loop=max_orders is None and not terminal_sentinel)
     cells = sum(1 for pattern in patterns for row in pattern for cell in row if cell != Cell())
     return track, {
         "title": module.title, "channels": module.channels, "orders": order_count,
         "patterns": len(patterns), "instruments": len(song.instruments),
         "waves": len(song.waves), "pcm_samples": len(song.pcm_samples),
         "pcm_bytes": sum(len(sample.data) for sample in song.pcm_samples),
+        "loop": max_orders is None and not terminal_sentinel,
         "semantic_cells": cells, "track_bytes": len(track),
     }

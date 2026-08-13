@@ -114,13 +114,10 @@ wt_table'Idx'$:
     ; increment[0] are a 16-bit remaining-sample count, increment[1] caches the
     ; current sample, and increment[2] is a per-voice divide-by-two counter.
     ; Volume bit 7 tags PCM, bit 6 requests cache priming, and the low five bits
-    ; retain mixer gain. Scale PCM to the tonal lane's 7-bit gain domain.
+    ; retain mixer gain. Scale the 5-bit PCM control into the tonal lane's
+    ; 7-bit gain domain without applying any PCM-specific boost.
 wt_pcm'Idx'$:
     anl a,#0x1f
-    mov r4,a
-    clr c
-    rrc a
-    add a,r4
     mov r4,a
     add a,r4
     mov r4,a

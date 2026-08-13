@@ -33,7 +33,7 @@ into several deduplicated T10 instruments and rewrite note cells; no MCU format
 change is required.
 
 XM sample `relative note` and `finetune` values calibrate the recorded sample's
-native pitch. The tonal lowering replaces that recording with a normalized
+native pitch. The tonal lowering replaces that recording with a reduced
 single-cycle oscillator, so those calibration offsets are deliberately removed.
 Applying them to the oscillator would transpose the written tracker note twice.
 The T10 relative-pitch field remains available for compiler-generated timbre
@@ -41,9 +41,10 @@ macros and future frontends; it is not copied blindly from an XM sample header.
 
 Looped XM samples are converted to signed 16-point song wavetables. Short loops
 are resampled directly; long loops first undergo bounded autocorrelation to
-extract a representative period. Tables are DC-centered, normalized and
-deduplicated. This preserves the original pulse-width family and distinctive
-chip waveforms instead of reducing every source to a small built-in palette.
+extract a representative period. Tables retain the selected source amplitudes
+and are deduplicated. This preserves the original pulse-width family and
+distinctive chip waveforms instead of reducing every source to a small built-in
+palette.
 
 Long non-looped samples are treated as one-shot percussion. The host selects the
 instrument's most frequent trigger note, applies XM relative-note and finetune
@@ -140,8 +141,10 @@ Flash resource bank. PCM voices read signed 16 kHz one-shots from the same image
 with `MOVC`; each fetched byte is cached and emitted for exactly two 32 kHz
 interrupts. Because a tracker channel
 owns its PCM state, all ten fixed voices may play PCM without allocation or new
-hot-state bytes. The PCM lane applies a fixed 1.5x transient gain before the shared
-24-bit accumulator; the final saturator remains the only clip point. The two
+hot-state bytes. The PCM lane expands its five-bit control by four into the same
+seven-bit linear gain domain as tonal voices before the shared 24-bit
+accumulator; it applies no PCM-specific boost. The final saturator remains the
+only clip point. The two
 noise selectors consume shared long-period and short-period LFSR samples. Both LFSRs advance once per sample,
 outside the voice expansion, so enabling a second drum voice cannot change the
 noise rate or sequence.
@@ -152,8 +155,8 @@ lane continues at exactly 16 kHz. The staggering prevents multiple drum lanes
 from synchronizing all Code Flash fetch and cursor-update work into every second
 rendered frame.
 
-The XM frontend removes PCM DC offset while retaining the source dynamic range;
-it does not normalize unrelated percussion toward a common loudness. It then
+The XM frontend retains PCM values and source dynamic range; it does not center
+or normalize unrelated percussion toward a common loudness. It then
 applies a 64-sample (4 ms at 16 kHz) linear tail fade to every PCM one-shot. The
 fade guarantees a zero-valued final sample and removes the abrupt one-shot-to-
 silence discontinuity without adding per-voice release state or renderer work.
@@ -237,13 +240,11 @@ range of 74 through 184. No snapshot reached the signed saturation threshold or
 either PWM rail, and the queue underrun counter remained zero. This remains the
 tonal baseline gain.
 
-Listening with the extracted percussion isolated showed that PCM triggering was
-correct but its short transients were masked by the continuous tonal voices. A
-fixed PCM-only mixer gain made percussion audible in the complete mix. The first
-2x setting later reached the saturator in a 60-second run, so the retained 1.5x
-setting balances audibility with headroom. With
-all channels enabled, live snapshots in a two-PCM passage ranged from -30
-through +41, did not approach either PWM rail, and queue underruns remained zero.
+Earlier listening experiments added fixed PCM-only gain because short transients
+were masked by normalized tonal voices. That policy was removed when source
+amplitudes were made faithful: XM sample, channel and envelope volumes are
+linear factors, tonal wavetables retain their source amplitude, and PCM receives
+no type-specific boost.
 
 The first v4 PCM build latched Timer0 deadline overruns at tracker-event
 boundaries despite a full producer queue. Replacing the C queue consumer with a
@@ -256,12 +257,12 @@ voices were active: audio underruns zero, `isr_overrun=false`, `clip=false` and
 parser error zero. The board remains at 33.1776 MHz; increasing the clock is not
 required.
 
-Generated or downloaded music used for listening tests must have clear
-redistribution permission before it is retained in a public repository. The
-source XM for the current local Funky Stars conversion is intentionally absent.
-The locally fetched verification file has SHA-256
-`2b7ce3c9efa7bb94067c1c7b00ed8b43433120f2ac2992903b09afd3d33739e3`;
-this identifies the exact source used to regenerate `scoreList.c` without
-redistributing that source in the repository.
+Generated or downloaded music used for listening tests retains its original
+third-party copyright and source metadata. The exact Funky Stars regression
+source and deterministic T10P output are stored under `music/xm/Quazar/`; the XM
+has SHA-256
+`2b7ce3c9efa7bb94067c1c7b00ed8b43433120f2ac2992903b09afd3d33739e3`.
+Repository inclusion documents compatibility and provenance; it does not add a
+new redistribution license.
 
 The complete byte-level contract is in [T10Format.md](T10Format.md).

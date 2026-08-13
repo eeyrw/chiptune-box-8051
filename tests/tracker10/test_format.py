@@ -8,7 +8,7 @@ from tools.tracker10.format import (ENV_ENABLED, ENV_SUSTAIN, MODE_PCM_BASE, PCM
                                     inspect_playlist, inspect_track, pack_playlist)
 from tools.tracker10.reference import ReferencePlayer
 from tools.tracker10.xm import (XmError, XmSample, _instrument_note_counts, _normalize_cell,
-                               analyze_xm, _pcm_sample, compile_xm, parse_xm)
+                               _wave_table, analyze_xm, _pcm_sample, compile_xm, parse_xm)
 
 
 def simple_song() -> Song:
@@ -128,14 +128,15 @@ def test_pcm_one_shot_fades_to_zero_without_changing_length():
     assert abs(signed[-2]) <= abs(signed[-PCM_RATE // 250])
 
 
-def test_pcm_one_shot_removes_dc_and_preserves_quiet_dynamics():
+def test_pcm_one_shot_preserves_source_level_and_quiet_dynamics():
     loud = XmSample("loud", tuple(([100] * 8 + [-20] * 8) * 16), 0, 0, 64, 0, 0, 0)
     quiet = XmSample("quiet", tuple(([12] * 8 + [-12] * 8) * 16), 0, 0, 64, 0, 0, 0)
     loud_values = tuple(value - 256 if value & 0x80 else value
                         for value in _pcm_sample(loud, 49).data[:-(PCM_RATE // 250)])
     quiet_values = tuple(value - 256 if value & 0x80 else value
                          for value in _pcm_sample(quiet, 49).data[:-(PCM_RATE // 250)])
-    assert abs(sum(loud_values) / len(loud_values)) < 1
+    assert max(loud_values) >= 95 and min(loud_values) <= -15
+    assert sum(loud_values) / len(loud_values) > 30
     assert 12 in quiet_values and -12 in quiet_values
     assert max(map(abs, quiet_values)) <= 16
 
@@ -202,6 +203,57 @@ def test_xm_instrument_and_pattern_are_preserved_semantically():
     assert inspect_track(track)["cells"] == 1
 
 
+def test_xm_sample_default_volume_initializes_channel_linearly():
+    module = parse_xm(minimal_xm())
+    source_instrument = module.instruments[0]
+    source_sample = source_instrument.samples[0]
+    source_instrument = type(source_instrument)(
+        **{**source_instrument.__dict__,
+           "samples": (type(source_sample)(**{**source_sample.__dict__, "volume": 32}),)})
+    row = list(module.patterns[0][0])
+    row[0] = Cell(note=49, instrument=1)
+    module = type(module)(**{**module.__dict__, "patterns": ((tuple(row),),),
+                             "instruments": (source_instrument,)})
+
+    track, _info = compile_xm(module)
+    decoded = decode_track(track)
+
+    assert decoded.patterns[0][0][0].volume == 33  # encoded 32 plus the T10 presence tag
+    assert decoded.instruments[0].gain == 31
+
+
+def test_xm_explicit_volume_overrides_sample_default_volume():
+    decoded = decode_track(compile_xm(parse_xm(minimal_xm()))[0])
+    assert decoded.patterns[0][0][0].volume == 65
+
+
+def test_full_default_volume_uses_runtime_note_instrument_default():
+    module = parse_xm(minimal_xm())
+    source_instrument = module.instruments[0]
+    source_sample = source_instrument.samples[0]
+    source_instrument = type(source_instrument)(
+        **{**source_instrument.__dict__,
+           "samples": (type(source_sample)(**{**source_sample.__dict__, "volume": 64}),)})
+    row = list(module.patterns[0][0])
+    row[0] = Cell(note=49, instrument=1)
+    module = type(module)(**{**module.__dict__, "patterns": ((tuple(row),),),
+                             "instruments": (source_instrument,)})
+    decoded = decode_track(compile_xm(module)[0])
+    assert decoded.patterns[0][0][0].volume == 0
+
+
+def test_xm_wavetable_preserves_quiet_source_amplitude():
+    sample = XmSample("quiet", tuple((12, -12) * 8), 0, 16, 64, 0, 1, 0)
+    wave = _wave_table(sample)
+    assert max(wave) == 12
+    assert min(wave) == -12
+
+
+def test_xm_wavetable_preserves_source_dc_offset():
+    sample = XmSample("offset", (10,) * 8 + (30,) * 8, 0, 16, 64, 0, 1, 0)
+    assert _wave_table(sample) == sample.values
+
+
 def test_xm_analysis_reports_unsupported_instrument_automation():
     module = parse_xm(minimal_xm())
     instrument = module.instruments[0]
@@ -216,6 +268,42 @@ def test_xm_analysis_reports_unsupported_instrument_automation():
 def test_zero_order_preview_is_rejected():
     with pytest.raises(XmError, match="at least one"):
         compile_xm(parse_xm(minimal_xm()), 0)
+
+
+def test_empty_final_restart_pattern_keys_off_and_ends_song():
+    module = parse_xm(minimal_xm())
+    empty = (Cell(),) * module.channels
+    terminal = list(empty)
+    terminal[0] = Cell(effect=0x0F, parameter=6)
+    module = type(module)(**{**module.__dict__, "orders": (0, 1), "restart": 1,
+                             "patterns": (module.patterns[0], (tuple(terminal),))})
+
+    track, info = compile_xm(module)
+    decoded = decode_track(track)
+
+    assert not track[6] & 1
+    assert info["loop"] is False
+    assert all(cell.note == 97 for cell in decoded.patterns[1][0])
+    assert "empty final restart pattern is treated as a one-shot ending" in analyze_xm(module)["warnings"]
+
+
+def test_musical_final_restart_pattern_remains_a_loop():
+    module = parse_xm(minimal_xm())
+    module = type(module)(**{**module.__dict__, "orders": (0, 0), "restart": 1})
+    track, info = compile_xm(module)
+    assert track[6] & 1
+    assert info["loop"] is True
+
+
+def test_arpeggio_only_final_restart_pattern_remains_a_loop():
+    module = parse_xm(minimal_xm())
+    arpeggio = list((Cell(),) * module.channels)
+    arpeggio[0] = Cell(effect=0, parameter=0x37)
+    module = type(module)(**{**module.__dict__, "orders": (0, 1), "restart": 1,
+                             "patterns": (module.patterns[0], (tuple(arpeggio),))})
+    track, info = compile_xm(module)
+    assert track[6] & 1
+    assert info["loop"] is True
 
 
 @pytest.mark.parametrize(("offset", "value", "message"), (

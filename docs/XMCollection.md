@@ -79,10 +79,25 @@ column 或损坏资源；生成完整且 CRC 有效的 T10P；最终 clean link 
 `EDx`、volume-column `8x/9x` 作明确告警的有损近似后，转换通过数从 28 提升到
 152；按当前 29,712 字节固定固件开销计算，143 首可单独链接，9 首因 T10P 过大
 排除。`music/xm/MANIFEST.tsv` 保存逐首结果、warning、哈希和 URL。
-加上单独收录的 JAM、Super Mario 2、Traven Tetris high scores 和贝多芬
-`Fur Elise`，当前集合共 147 对 XM/T10P：13 首 `exact`，134 首 `approximate`；
-全部通过 fresh compile
+加上单独收录的 JAM、Super Mario 2、Traven Tetris high scores、贝多芬
+`Fur Elise`、Rez + Kenet 的 `Unreeeal Superhero 3` 和 Quazar 的
+`Funky Stars`，当前集合共 149 对 XM/T10P：13 首 `exact`，136 首
+`approximate`。按忠实线性音量模型重建后，149 首均可单独装入当前
+65,024-byte 程序区；全部通过 fresh compile
 逐字节比对和 SHA-256 校验。
+
+`Unreeeal Superhero 3` 来源：
+
+```text
+https://ftp.modland.com/pub/modules/Fasttracker%202/Rez/coop-Kenet/unreeeal%20superhero%203.xm
+https://ftp.modland.com/pub/modules/Fasttracker%202/Quazar/funky%20stars.xm
+```
+
+其 XM `restart=16` 指向唯一引用的最后一个空 pattern。该 pattern 除 `F06`
+外没有 note、instrument、volume 或产生声音的 effect，是原曲使用的结束哨兵。
+转换器在进入该 pattern 时生成十轨 note-off，并清除 T10M loop 标志；尾段走完后
+进入既有 terminal 静音路径。restart pattern 有音乐内容、非 `Fxx` effect，或在
+order 列表中被多次引用时不会套用此规则。
 
 当前剩余阻塞点以超过 10 通道、`E6x` pattern loop、复合效果、损坏/非标准 XM
 为主。优先级建议：

@@ -222,6 +222,13 @@ rounded 16-bit stages to avoid overflow on the 8051:
 output = (channel_volume * instrument_gain * macro_value + 256) / 512
 ```
 
+These fields are linear amplitude factors, not decibels. For example, an XM
+volume of 32 is one half of full amplitude, or approximately -6.02 dB after
+conversion with `20 * log10(32 / 64)`. The XM frontend lowers a sample's default
+volume into the channel-volume value on instrument events; it is not a permanent
+instrument multiplier. XM-generated instruments therefore use unity gain
+(`31`).
+
 The tonal runtime result is clamped to `0..127`; PCM triggers are converted to
 `0..31` because the upper control bits tag PCM state. Pitch macro entries are signed
 quarter-semitone offsets. They are added to the
@@ -229,7 +236,7 @@ Q8.8 channel pitch by multiplying by 64.
 
 The relative-pitch field describes a deliberate offset in the compiled
 instrument, not the source sample's tuning metadata. When an XM sample is
-replaced by a normalized single-cycle oscillator, its `relative note` and
+replaced by a reduced single-cycle oscillator, its `relative note` and
 `finetune` calibration must be removed or baked into sample analysis rather than
 copied here; otherwise the musical note is transposed a second time.
 
@@ -254,10 +261,9 @@ The renderer then reuses that channel's eight hot bytes: phase low/mid are the F
 cursor, phase high plus increment low are the remaining length, increment mid is
 the cached signed sample, and increment high is the two-frame hold counter.
 Up to all ten fixed voices may therefore play PCM concurrently without enlarging
-the 90-byte DATA hot block or the XRAM event queue. The runtime applies 1.5x PCM
-mixer gain to keep short percussion transients perceptually balanced against
-continuous normalized wavetable voices; this is mixer policy, not stored sample
-pre-emphasis.
+the 90-byte DATA hot block or the XRAM event queue. PCM's five-bit control is
+multiplied by four to enter the same seven-bit linear gain domain as tonal
+voices. No source-type-specific gain is applied.
 
 Macros are evaluated at tracker-tick rate. Tick 0 reads element zero; positions
 advance after the tick output has been produced. A normal note resets envelope,

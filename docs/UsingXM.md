@@ -81,6 +81,27 @@ panning。`6x/7x` 在没有 main effect 时降为 `Axy`；同一 cell 已有 mai
 舍弃并报告 warning。`8x/9x` fine volume slide 和 panning 当前舍弃并报告 warning。
 其他命令明确拒绝，避免无提示地播放成错误音乐。
 
+### 音量是线性幅度，不是 dB
+
+XM 的 sample default volume、channel volume、`Cxx`/volume column、volume
+envelope 和 fadeout 都在线性幅度域组合。`linear frequency` 模式只影响音高周期
+换算，与音量标度无关。例如 `32/64` 是半幅，换成 dB 才是
+`20 * log10(32/64) = -6.02 dB`。
+
+sample default volume 的语义是：选择该 sample 时初始化 channel volume。它不是
+一个永久 instrument gain。转换器把非满量程 default volume 写入 instrument 事件；
+之后的绝对音量命令和 slide 直接修改同一个 channel volume。XM 生成的 T10
+instrument gain 固定为 unity (`31`)。16 点波表保留抽取后的源幅度，不做逐乐器
+DC centering 或 peak normalization；PCM 也保留源幅度。PCM 五位控制仅乘四映射到
+与波表相同的七位线性增益域，不再附加类型专属增益。
+
+### 空白 restart 结尾
+
+部分 XM 将 restart 指向最后一个、唯一引用且无音乐事件的 pattern，表示一次性
+播放结束。转换器会报告 `empty final restart pattern is treated as a one-shot
+ending`，在尾段第一行关闭十个声部，并让曲目在尾段结束后进入 `STOPPED`。普通
+restart 循环和有内容的末尾 pattern 不受影响。
+
 ### 编译成功仍需注意的限制
 
 - panning command 和 sample default panning 不参与单声道 fold；
