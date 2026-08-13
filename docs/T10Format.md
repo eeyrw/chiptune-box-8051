@@ -298,8 +298,14 @@ rounding drift. Speed controls ticks per row and does not enter this calculation
 | `2xx` | Pitch slide down, linear or Amiga-period scaled | Yes |
 | `3xx` | Tone portamento to note target | Yes |
 | `4xy` | Sine vibrato speed x, depth y | Nibble-wise |
+| `6xy` | Host-lowered to `Axy`; vibrato is reported as discarded | Yes, as `Axy` |
+| `9xx` | Host discards sample offset and reports the approximation | No |
 | `Axy` | Volume slide; up wins when x is nonzero | Yes |
+| `Bxx` | Position jump to order xx after the current row | No |
+| `Dxx` | Pattern break to decimal row xx in the next/jump order | No |
 | `E9x` | Retrigger oscillator and instrument macros every x ticks | No |
+| `ECx` | Cut the note at tick x | No |
+| `EDx` | Host triggers at tick zero and reports the approximation | No |
 | `Fxx` | Speed when `< 0x20`, otherwise BPM | No |
 
 Effect movement begins on tick 1. A zero parameter for effects with memory reuses
@@ -315,9 +321,10 @@ Q8.8 note. It converts source period deltas into note deltas for `1xx`, `2xx`,
 effects without carrying periods, logarithms or division into the ISR.
 
 Any other source effect currently causes compilation to fail with its pattern,
-row and channel location. Silent approximation is forbidden. Future frontends
-may lower an otherwise unsupported effect to a bounded per-channel automation
-macro without changing the device VM.
+row and channel location. Source approximations are accepted only when
+`inspect-xm` reports a warning. Future frontends may lower an otherwise
+unsupported effect to a bounded per-channel automation macro without changing
+the device VM.
 
 ## 8. Validation and storage rules
 

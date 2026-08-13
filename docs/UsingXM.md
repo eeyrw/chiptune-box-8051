@@ -3,6 +3,7 @@
 本文描述从一个 FastTracker II XM 文件到板上试听的完整流程。XM 只在主机端
 解析；8051 播放的是编译后的 `T10P/T10M v4` 语义曲谱、16 字节波表和 16 kHz
 PCM one-shot。
+各 Python 命令的完整参数和副作用见 [PythonTools.md](PythonTools.md)。
 
 ## 1. 环境与输入要求
 
@@ -63,12 +64,21 @@ volume-column 命令、超过 16 张波表、XM 损坏或截断。错误位置�
 | `1xx` / `2xx` | pitch slide up/down |
 | `3xx` | tone portamento，含参数记忆且不重触发相位 |
 | `4xy` | vibrato |
+| `6xy` | 保留 volume slide，舍弃 vibrato 并报告 warning |
 | `8xx` | 接受但丢弃声像，因为输出为单声道 |
+| `9xx` | 当前从采样开头播放并报告 warning |
 | `Axy` | volume slide |
+| `Bxx` | 下一行跳到指定 order |
+| `Cxx` | tick 0 设置绝对音量 `00..40` |
+| `Dxx` | 下一行进入下一 order 的十进制 `xx` 行；可与 `Bxx` 组合 |
+| `ECx` | 在 tick x note cut |
+| `EDx` | 当前在 tick 0 触发并报告 warning |
 | `E9x` | note retrigger |
 | `Fxx` | speed/BPM |
 
-volume column 当前接受 `10..50` 音量设定和 `C0..CF` panning；后者被丢弃。
+volume column 当前接受 `10..50` 音量设定、`6x/7x` 音量滑动和 `C0..CF`
+panning。`6x/7x` 在没有 main effect 时降为 `Axy`；同一 cell 已有 main effect 时
+舍弃并报告 warning。`8x/9x` fine volume slide 和 panning 当前舍弃并报告 warning。
 其他命令明确拒绝，避免无提示地播放成错误音乐。
 
 ### 编译成功仍需注意的限制
@@ -82,6 +92,7 @@ volume column 当前接受 `10..50` 音量设定和 `C0..CF` panning；后者被
 - 包络最多编译为 16 个定时点，因此极复杂包络是有界近似。
 
 这些限制的设计和审计细节见 [XMCompatibilityAudit.md](XMCompatibilityAudit.md)。
+互联网曲库的来源、查找、批量筛选和记录方式见 [XMCollection.md](XMCollection.md)。
 
 ## 3. 生成固件内置曲谱
 
@@ -156,6 +167,17 @@ sample 数量、删除未使用 pattern/order，或重新安排长 PCM；不要�
 音频热路径。
 
 ## 5. 下载与启动
+
+也可以从 XM 一步完成转换、clean build、保留 HEX 和下载：
+
+```bash
+make flash-xm TRACKER_INPUT="$XM" \
+  XM_HEX_OUTPUT=build/xm/song.hex
+```
+
+该目标使用 `build/xm/scoreList.c` 参与本次构建，不覆盖仓库根目录的
+`scoreList.c`。默认还保留 `build/xm/song.t10p`。只生成 HEX、不下载时使用相同
+参数运行 `make xm-hex`。
 
 默认串口和波特率是：
 

@@ -130,11 +130,6 @@ uint8_t SpiFlash_ReadByte(uint32_t addr)
 	return val;
 }
 
-void SpiFlash_ReadBytes(uint32_t addr, uint8_t *buf, uint16_t len)
-{
-	spi_read_raw(addr, buf, len);
-}
-
 uint8_t SpiFlash_ReadCached(uint32_t addr)
 {
 	uint32_t aligned = addr & ~(uint32_t)CACHE_MASK;
@@ -143,35 +138,6 @@ uint8_t SpiFlash_ReadCached(uint32_t addr)
 		cache_fill(aligned);
 
 	return spi_cache[addr & CACHE_MASK];
-}
-
-void SpiFlash_ReadBytesCached(uint32_t addr, uint8_t *buf, uint16_t len)
-{
-	while (len > 0)
-	{
-		uint32_t aligned   = addr & ~(uint32_t)CACHE_MASK;
-		uint16_t offset    = (uint16_t)(addr & CACHE_MASK);
-		uint16_t available = CACHE_SIZE - offset;
-		uint16_t chunk     = (len < available) ? len : available;
-
-		if (!spi_cache_valid || aligned != spi_cache_base)
-			cache_fill(aligned);
-
-		{
-			uint8_t *src = spi_cache + offset;
-			uint16_t i;
-			for (i = 0; i < chunk; i++)
-				*buf++ = *src++;
-		}
-
-		addr += chunk;
-		len  -= chunk;
-	}
-}
-
-void SpiFlash_CacheInvalidate(void)
-{
-	spi_cache_valid = 0;
 }
 
 uint8_t SpiFlash_SectorErase(uint32_t addr)

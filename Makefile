@@ -45,6 +45,7 @@ DEFS       = STC8
 
 # define root dir
 ROOT_DIR     = .
+SCORE_SOURCE ?= scoreList.c
 
 # define include dir
 INCLUDE_DIRS = TrackerPlayer WavetableSynth
@@ -58,13 +59,12 @@ SRC 	+= main.c
 SRC 	+= WavetableSynth/WavetableSynth.c
 SRC 	+= WavetableSynth/PitchTable.c
 SRC 	+= TrackerPlayer/TrackerPlayer.c
-SRC 	+= UartRedirect.c
 SRC 	+= Bsp.c
 SRC 	+= Protocol.c
 
 SRC 	+= Storage.c
 SRC 	+= SpiFlash.c
-SRC 	+= scoreList.c
+SRC 	+= $(SCORE_SOURCE)
 
 ASM_SRC =
 ASM_SRC   += WavetableSynth/WavetableSynthAsm.s
@@ -96,11 +96,15 @@ all: $(OBJECTS) $(PROJECT_NAME).ihx $(PROJECT_NAME).hex $(PROJECT_NAME).bin
 # Don't delete dependency files
 .PRECIOUS: %.d
 
-.PHONY: FORCE host-test compile-tracker generate-builtin-score
+.PHONY: FORCE host-test compile-tracker generate-builtin-score xm-hex flash-xm
 
 TRACKER_INPUT ?=
 TRACKER_OUTPUT ?= output.t10p
 TRACKER_C_OUTPUT ?= scoreList.c
+XM_BUILD_DIR ?= build/xm
+XM_T10P_OUTPUT ?= $(XM_BUILD_DIR)/song.t10p
+XM_SCORE_C ?= $(XM_BUILD_DIR)/scoreList.c
+XM_HEX_OUTPUT ?= $(XM_BUILD_DIR)/music-box-8051.hex
 
 host-test:
 	@$(PYTHON) -m pytest -q tests/tracker10
@@ -110,6 +114,20 @@ compile-tracker:
 
 generate-builtin-score:
 	@$(PYTHON) tools/gen_builtin_demo.py
+
+xm-hex:
+	@test -n "$(TRACKER_INPUT)" || { echo "TRACKER_INPUT is required" >&2; exit 2; }
+	@mkdir -p "$(XM_BUILD_DIR)" "$(dir $(XM_T10P_OUTPUT))" \
+		"$(dir $(XM_SCORE_C))" "$(dir $(XM_HEX_OUTPUT))"
+	@$(PYTHON) tools/tracker10_tool.py compile "$(TRACKER_INPUT)" \
+		"$(XM_T10P_OUTPUT)" --c-output "$(XM_SCORE_C)"
+	@$(MAKE) clean SCORE_SOURCE="$(XM_SCORE_C)"
+	@$(MAKE) $(PROJECT_NAME).hex SCORE_SOURCE="$(XM_SCORE_C)"
+	@cp "$(PROJECT_NAME).hex" "$(XM_HEX_OUTPUT)"
+	@echo [XM] HEX written to $(XM_HEX_OUTPUT)
+
+flash-xm: xm-hex
+	@$(MAKE) flash SCORE_SOURCE="$(XM_SCORE_C)"
 
 # Don't rebuild deps if cleaning
 ifneq ($(MAKECMDGOALS),clean)

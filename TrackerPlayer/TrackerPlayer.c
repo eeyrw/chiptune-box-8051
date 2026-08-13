@@ -166,6 +166,28 @@ static uint8_t load_order(MEM_XDATA(TrackerVm) *vm)
     return load_pattern(vm, stream_u8(&vm->trackStream, orderOffset + vm->order));
 }
 
+static uint8_t seek_pattern_row(MEM_XDATA(TrackerVm) *vm, uint8_t target)
+{
+    static MEM_XDATA(uint8_t) mask;
+    static MEM_XDATA(uint8_t) channel;
+    static MEM_XDATA(uint16_t) changed;
+    static MEM_XDATA(uint8_t) fields;
+    while (vm->row < target) {
+        if (!read16(vm, &changed) || (changed & 0xFC00)) { trackerLastError = 0x81; return 0; }
+        for (channel = 0; channel < WT_VOICE_COUNT; channel++) {
+            if (!(changed & ((uint16_t)1 << channel))) continue;
+            if (!read8(vm, &mask) || !mask || (mask & 0xF0)) { trackerLastError = 0x82; return 0; }
+            fields = ((mask & CELL_NOTE) ? 1 : 0) + ((mask & CELL_INSTRUMENT) ? 1 : 0)
+                   + ((mask & CELL_VOLUME) ? 1 : 0) + ((mask & CELL_EFFECT) ? 2 : 0);
+            while (fields--) {
+                if (!read8(vm, &mask)) { trackerLastError = 0x86; return 0; }
+            }
+        }
+        vm->row++;
+    }
+    return 1;
+}
+
 static void remember_effect(MEM_XDATA(TrackerChannelState) *channel)
 {
     uint8_t parameter = channel->parameter;
@@ -206,6 +228,9 @@ static uint8_t decode_row(MEM_XDATA(TrackerVm) *vm)
     static MEM_XDATA(uint8_t) effect;
     static MEM_XDATA(uint8_t) parameter;
     static TrackerChannelState __xdata * __xdata channel;
+    vm->nextOrder = vm->order + 1;
+    vm->nextRow = 0;
+    vm->flowPending = 0;
     for (channelIndex = 0; channelIndex < WT_VOICE_COUNT; channelIndex++) {
         vm->channel[channelIndex].effect = 0;
         vm->channel[channelIndex].parameter = 0;
@@ -236,6 +261,13 @@ static uint8_t decode_row(MEM_XDATA(TrackerVm) *vm)
             if (parameter < 0x20) vm->speed = parameter;
             else vm->bpm = parameter;
         }
+        if (effect == 0x0B) {
+            vm->nextOrder = parameter;
+            vm->flowPending = 1;
+        } else if (effect == 0x0D) {
+            vm->nextRow = (uint8_t)((parameter >> 4) * 10 + (parameter & 15));
+            vm->flowPending = 1;
+        }
         if (note == 97) {
             channel->keyOn = 0;
             if (!(channel->definition.volumeFlags & TRACKER_ENV_ENABLED)) channel->gate = 0;
@@ -251,6 +283,10 @@ static uint8_t decode_row(MEM_XDATA(TrackerVm) *vm)
                 if (!(mask & CELL_VOLUME) && instrument) channel->volume = 64;
                 vm->pendingReset |= bit;
             }
+        }
+        if (effect == 0x0E && parameter == 0xC0) {
+            channel->keyOn = 0;
+            channel->gate = 0;
         }
     }
     return 1;
@@ -312,6 +348,10 @@ static void apply_tick_effects(MEM_XDATA(TrackerVm) *vm)
             interval = channel->parameter & 15;
             if ((channel->parameter >> 4) == 9 && interval && vm->tick % interval == 0)
                 retrigger_channel(vm, i);
+            else if ((channel->parameter >> 4) == 0x0C && vm->tick == interval) {
+                channel->keyOn = 0;
+                channel->gate = 0;
+            }
             break;
         }
     }
@@ -388,6 +428,21 @@ static uint8_t advance_song(MEM_XDATA(TrackerVm) *vm)
     vm->tick++;
     if (vm->tick < vm->speed) return 1;
     vm->tick = 0;
+    if (vm->flowPending) {
+        if (vm->nextOrder >= vm->orderCount) {
+            if (!vm->loop) {
+                vm->pendingEnd = 1;
+                vm->flowPending = 0;
+                return 1;
+            }
+            vm->nextOrder = vm->restartOrder;
+        }
+        vm->order = vm->nextOrder;
+        if (!load_order(vm)) return 0;
+        if (vm->nextRow >= vm->patternRows) { trackerLastError = 0x94; return 0; }
+        vm->flowPending = 0;
+        return seek_pattern_row(vm, vm->nextRow);
+    }
     vm->row++;
     if (vm->row < vm->patternRows) return 1;
     vm->order++;

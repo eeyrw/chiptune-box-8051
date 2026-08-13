@@ -7,8 +7,8 @@ from tools.tracker10.format import (ENV_ENABLED, ENV_SUSTAIN, MODE_PCM_BASE, PCM
                                     Cell, Instrument, PcmSample, Song, decode_track, encode_track,
                                     inspect_playlist, inspect_track, pack_playlist)
 from tools.tracker10.reference import ReferencePlayer
-from tools.tracker10.xm import (XmError, XmSample, _instrument_note_counts, analyze_xm,
-                               _pcm_sample, compile_xm, parse_xm)
+from tools.tracker10.xm import (XmError, XmSample, _instrument_note_counts, _normalize_cell,
+                               analyze_xm, _pcm_sample, compile_xm, parse_xm)
 
 
 def simple_song() -> Song:
@@ -250,6 +250,88 @@ def test_unsupported_effect_fails_instead_of_sounding_wrong():
     module = parse_xm(minimal_xm(5, 1))
     with pytest.raises(XmError, match="unsupported effect"):
         compile_xm(module)
+
+
+def test_xm_set_volume_effect_lowers_to_absolute_volume():
+    assert _normalize_cell(Cell(effect=0x0C, parameter=0), 1, 2, 3) == Cell(volume=1)
+    assert _normalize_cell(Cell(effect=0x0C, parameter=64), 1, 2, 3) == Cell(volume=65)
+    with pytest.raises(XmError, match="invalid set-volume"):
+        _normalize_cell(Cell(effect=0x0C, parameter=65), 1, 2, 3)
+    with pytest.raises(XmError, match="conflicting volume-column"):
+        _normalize_cell(Cell(volume=0x20, effect=0x0C, parameter=32), 1, 2, 3)
+
+
+def test_empty_extended_effect_is_a_noop_but_nonzero_e0x_is_rejected():
+    assert _normalize_cell(Cell(effect=0x0E, parameter=0), 1, 2, 3) == Cell()
+    with pytest.raises(XmError, match="unsupported extended effect E01"):
+        _normalize_cell(Cell(effect=0x0E, parameter=1), 1, 2, 3)
+
+
+def test_volume_column_slides_reuse_main_volume_slide_effect():
+    assert _normalize_cell(Cell(volume=0x63), 1, 2, 3) == Cell(effect=0x0A, parameter=3)
+    assert _normalize_cell(Cell(volume=0x74), 1, 2, 3) == Cell(effect=0x0A, parameter=0x40)
+    assert _normalize_cell(Cell(volume=0x8F), 1, 2, 3) == Cell()
+    assert _normalize_cell(Cell(volume=0x63, effect=1, parameter=2), 1, 2, 3) == Cell(
+        effect=1, parameter=2)
+
+
+def test_lossy_effect_lowering_is_explicit_and_note_cut_is_preserved():
+    assert _normalize_cell(Cell(effect=6, parameter=0x03), 1, 2, 3) == Cell(
+        effect=0x0A, parameter=3)
+    assert _normalize_cell(Cell(effect=9, parameter=0x20), 1, 2, 3) == Cell()
+    assert _normalize_cell(Cell(note=49, effect=0x0E, parameter=0xD2), 1, 2, 3) == Cell(note=49)
+    assert _normalize_cell(Cell(effect=0x0E, parameter=0xC2), 1, 2, 3) == Cell(
+        effect=0x0E, parameter=0xC2)
+
+
+def test_reference_vm_cuts_note_on_requested_tick():
+    row = [Cell() for _ in range(10)]
+    row[0] = Cell(note=49, instrument=1, effect=0x0E, parameter=0xC2)
+    song = Song((0,), 0, 4, 125, ((tuple(row),),), (Instrument(),))
+    player = ReferencePlayer(song)
+    frames = [player.step() for _ in range(4)]
+    assert [frame.voices[0].volume > 0 for frame in frames] == [True, True, False, False]
+
+
+def test_reference_vm_pattern_break_and_position_jump():
+    empty = (Cell(),) * 10
+
+    def marked(note, effect=0, parameter=0):
+        row = list(empty)
+        row[0] = Cell(note=note, instrument=1, effect=effect, parameter=parameter)
+        return tuple(row)
+
+    patterns = (
+        (marked(49, 0x0B, 2),),
+        (marked(50),),
+        (marked(51), marked(52), marked(53, 0x0D, 1)),
+        (marked(54), marked(55)),
+    )
+    song = Song((0, 1, 2, 3), 0, 1, 125, patterns, (Instrument(),))
+    player = ReferencePlayer(song)
+    frames = [player.step() for _ in range(4)]
+    assert [(frame.order, frame.row) for frame in frames] == [(0, 0), (2, 0), (2, 1), (2, 2)]
+    assert (player.order, player.row) == (3, 1)
+
+
+def test_xm_rejects_invalid_flow_control_before_encoding():
+    module = parse_xm(minimal_xm(0x0B, 1))
+    with pytest.raises(XmError, match="position jump"):
+        compile_xm(module)
+    module = parse_xm(minimal_xm(0x0D, 0x1A))
+    with pytest.raises(XmError, match="invalid pattern break"):
+        compile_xm(module)
+
+
+def test_pattern_break_on_last_order_uses_restart_order():
+    empty = (Cell(),) * 10
+    first = list(empty)
+    first[0] = Cell(note=49, instrument=1, effect=0x0D)
+    song = Song((0,), 0, 1, 125, ((tuple(first),),), (Instrument(),))
+    player = ReferencePlayer(song)
+    frame = player.step()
+    assert (frame.order, frame.row) == (0, 0)
+    assert (player.order, player.row) == (0, 0)
 
 
 def test_xm_note_statistics_follow_instrument_memory_and_order_reuse():

@@ -66,6 +66,8 @@ class ReferencePlayer:
         self.speed = song.speed
         self.bpm = song.bpm
         self.remainder = 0
+        self.next_order: int | None = None
+        self.next_row = 0
 
     def _remember(self, channel: Channel) -> None:
         parameter = channel.parameter
@@ -88,6 +90,8 @@ class ReferencePlayer:
 
     def _row(self) -> None:
         cells = self.song.patterns[self.song.orders[self.order]][self.row]
+        self.next_order = None
+        self.next_row = 0
         for channel in self.channels:
             channel.effect = channel.parameter = 0
         for index, cell in enumerate(cells):
@@ -105,6 +109,12 @@ class ReferencePlayer:
                     self.speed = cell.parameter
                 else:
                     self.bpm = cell.parameter
+            if cell.effect == 0x0B:
+                self.next_order = cell.parameter
+            elif cell.effect == 0x0D:
+                self.next_row = (cell.parameter >> 4) * 10 + (cell.parameter & 15)
+                if self.next_order is None:
+                    self.next_order = self.order + 1
             if cell.note == 97:
                 channel.key_on = False
                 if not channel.instrument.volume_flags & ENV_ENABLED:
@@ -121,6 +131,8 @@ class ReferencePlayer:
                     if not cell.volume and cell.instrument:
                         channel.volume = 64
                     channel.reset = True
+            if cell.effect == 0x0E and cell.parameter == 0xC0:
+                channel.key_on = channel.gate = False
 
     def _effects(self) -> None:
         if not self.tick:
@@ -148,6 +160,9 @@ class ReferencePlayer:
                 if interval and self.tick % interval == 0:
                     channel.volume_position = channel.pitch_position = 0
                     channel.reset = True
+            elif channel.effect == 0x0E and channel.parameter >> 4 == 0x0C:
+                if self.tick == channel.parameter & 15:
+                    channel.key_on = channel.gate = False
 
     @staticmethod
     def _advance(position: int, length: int, loop: int) -> int:
@@ -222,6 +237,14 @@ class ReferencePlayer:
         self.tick += 1
         if self.tick >= self.speed:
             self.tick = 0
+            if self.next_order is not None:
+                self.order = (self.next_order if self.next_order < len(self.song.orders)
+                              else self.song.restart)
+                self.row = self.next_row
+                self.next_order = None
+                self.next_row = 0
+                return TickFrame(wait, tuple(voices), frame_order, frame_row, frame_tick,
+                                 tuple(pcm_triggers))
             self.row += 1
             pattern = self.song.patterns[self.song.orders[self.order]]
             if self.row >= len(pattern):

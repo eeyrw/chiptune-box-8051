@@ -99,6 +99,7 @@ typedef struct _TrackerVm {
     uint16_t order;
     uint16_t instrumentCount;
     uint16_t pendingReset;
+    uint16_t nextOrder;
     uint16_t bpm;
     uint8_t patternCount;
     uint8_t speed;
@@ -108,6 +109,8 @@ typedef struct _TrackerVm {
     uint8_t waveCount;
     uint8_t pcmCount;
     uint8_t pendingEnd;
+    uint8_t nextRow;
+    uint8_t flowPending;
     uint8_t status;
 } TrackerVm;
 

@@ -11,11 +11,8 @@
 void SpiFlash_Init(void);
 
 uint8_t SpiFlash_ReadByte(uint32_t addr);
-void SpiFlash_ReadBytes(uint32_t addr, uint8_t *buf, uint16_t len);
 
 uint8_t SpiFlash_ReadCached(uint32_t addr);
-void SpiFlash_ReadBytesCached(uint32_t addr, uint8_t *buf, uint16_t len);
-void SpiFlash_CacheInvalidate(void);
 
 uint8_t SpiFlash_SectorErase(uint32_t addr);
 uint8_t SpiFlash_ChipErase(void);

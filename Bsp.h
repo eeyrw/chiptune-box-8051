@@ -60,9 +60,6 @@
 
 void HardwareInit(void);
 void StartAudioOutput(void);
-void StopAudioOutput(void);
-uint8_t GetRandom(void);
-void IntoPowerDown(void);
 uint32_t GetSysMs(void);
 uint16_t Get_ADCResult(uint8_t channel);
 

@@ -32,11 +32,20 @@ make clean && make
 make compile-tracker TRACKER_INPUT=song.xm TRACKER_OUTPUT=song.t10p
 ```
 
+从 XM 隔离生成 HEX 并直接下载，不覆盖仓库 `scoreList.c`：
+
+```bash
+make flash-xm TRACKER_INPUT="song.xm" \
+  XM_HEX_OUTPUT=build/xm/song.hex
+```
+
 当前内置测试曲是 Quazar / Sanxion 的 Funky Stars 原始 10-channel XM 的
 波表化测试转换。源 XM 不纳入仓库，`scoreList.c` 是供当前硬件验证的编译结果。
 日后更换 XM 时的完整预检、转换、空间检查、下载、逐声道试听和排错流程见
 [docs/UsingXM.md](docs/UsingXM.md)。注意：当前板子播放的是编进内部 Code Flash
 的 `scoreList.c`，单独生成 `.t10p` 不会更换板上曲目。
+互联网 XM 的来源、检索方法、批量筛选标准和 2026-08-13 收集结果见
+[docs/XMCollection.md](docs/XMCollection.md)。
 
 ## Runtime
 
@@ -64,3 +73,5 @@ python3 tools/musicbox_proto.py mute 0
 架构见 [docs/Tracker10Architecture.md](docs/Tracker10Architecture.md)，逐字节格式规范见
 [docs/T10Format.md](docs/T10Format.md)，
 串口协议见 [docs/Protocol.md](docs/Protocol.md)。
+所有 Python CLI、批处理脚本、生成器和 `tools/tracker10` 主机库的完整参考见
+[docs/PythonTools.md](docs/PythonTools.md)。

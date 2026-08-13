@@ -174,10 +174,6 @@ void StartAudioOutput(void)
     ET0 = 1;
 }
 
-void StopAudioOutput(void)
-{
-}
-
 //========================================================================
 // 函数: void	ADC_Inilize(ADC_InitTypeDef *ADCx)
 // 描述: ADC初始化程序.
@@ -249,22 +245,6 @@ uint16_t Get_ADCResult(uint8_t channel) //channel = 0~15
         }
     }
     return 4096; //错误,返回4096,调用的程序判断
-}
-
-uint8_t GetRandom(void)
-{
-    uint8_t random = 0;
-    uint8_t i;
-    for (i = 0; i < 3; i++)
-    {
-        random |= ((Get_ADCResult(ADC_CH0) & 0x07) << (i * 3));
-    }
-    return random;
-}
-
-void IntoPowerDown(void)
-{
-    PCON |= 0x01;    // 进入 IDLE 模式 (CPU 休眠, 外设继续运行, ISR 可唤醒)
 }
 
 extern MEM_FAST_DATA(uint32_t) sysMs;

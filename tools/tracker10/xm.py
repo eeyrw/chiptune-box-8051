@@ -352,9 +352,19 @@ def _compile_instrument(instrument: XmInstrument, note: int
 
 def _normalize_cell(cell: Cell, pattern: int, row: int, channel: int) -> Cell:
     volume = 0
+    volume_effect = 0
+    volume_parameter = 0
     if cell.volume:
         if 0x10 <= cell.volume <= 0x50:
             volume = cell.volume - 0x10 + 1
+        elif 0x60 <= cell.volume <= 0x6F:
+            volume_effect = 0x0A
+            volume_parameter = cell.volume & 15
+        elif 0x70 <= cell.volume <= 0x7F:
+            volume_effect = 0x0A
+            volume_parameter = (cell.volume & 15) << 4
+        elif 0x80 <= cell.volume <= 0x9F:
+            pass  # Fine volume slides are an explicitly reported approximation.
         elif 0xC0 <= cell.volume <= 0xCF:
             volume = 0  # Mono output deliberately discards volume-column panning.
         else:
@@ -362,11 +372,28 @@ def _normalize_cell(cell: Cell, pattern: int, row: int, channel: int) -> Cell:
     effect, parameter = cell.effect, cell.parameter
     if effect == 8:
         effect = parameter = 0  # Mono output deliberately discards panning.
+    elif effect == 6:
+        effect = 0x0A  # Keep the volume slide; discarded vibrato is reported.
+    elif effect == 9:
+        effect = parameter = 0  # Discarded sample offset is reported.
+    elif effect == 0x0C:
+        if parameter > 64:
+            raise XmError(f"invalid set-volume effect C{parameter:02X} at {pattern}:{row}:{channel}")
+        if volume:
+            raise XmError(f"conflicting volume-column and Cxx commands at {pattern}:{row}:{channel}")
+        volume = parameter + 1
+        effect = parameter = 0
     elif effect == 0x0E:
-        if parameter >> 4 != 9:
+        if parameter == 0:
+            effect = parameter = 0  # Empty legacy E00 has no FT2 playback effect.
+        elif parameter >> 4 == 0x0D:
+            effect = parameter = 0  # Note delay is approximated at tick zero.
+        elif parameter >> 4 not in (9, 0x0C):
             raise XmError(f"unsupported extended effect E{parameter:02X} at {pattern}:{row}:{channel}")
-    elif effect not in (0, 1, 2, 3, 4, 0x0A, 0x0F):
+    elif effect not in (0, 1, 2, 3, 4, 0x0A, 0x0B, 0x0D, 0x0F):
         raise XmError(f"unsupported effect {effect:X}{parameter:02X} at {pattern}:{row}:{channel}")
+    if volume_effect and not (effect or parameter):
+        effect, parameter = volume_effect, volume_parameter
     return Cell(cell.note, cell.instrument, volume, effect, parameter)
 
 
@@ -402,6 +429,27 @@ def analyze_xm(module: XmModule) -> dict:
         warnings.append(f"module has {module.channels} channels; Tracker10 accepts at most 10")
     if effects["8xx"] or volume_commands["Cx"]:
         warnings.append("panning commands are discarded because hardware output is mono")
+    if effects["6xx"]:
+        warnings.append(f"{effects['6xx']} vibrato-volume slides keep only the volume slide")
+    if effects["9xx"]:
+        warnings.append(f"{effects['9xx']} sample-offset commands start samples from the beginning")
+    note_delays = sum(1 for pattern_index in module.orders
+                      for row in module.patterns[pattern_index] for cell in row
+                      if cell.effect == 0x0E and cell.parameter >> 4 == 0x0D)
+    if note_delays:
+        warnings.append(f"{note_delays} note-delay commands trigger at tick zero")
+    fine_volume = volume_commands["8x"] + volume_commands["9x"]
+    if fine_volume:
+        warnings.append(f"{fine_volume} volume-column fine slides are discarded")
+    conflicting_slides = 0
+    for pattern_index in module.orders:
+        for row in module.patterns[pattern_index]:
+            for cell in row:
+                if 0x60 <= cell.volume <= 0x7F and (cell.effect or cell.parameter):
+                    conflicting_slides += 1
+    if conflicting_slides:
+        warnings.append(
+            f"{conflicting_slides} volume-column slides that share a main effect are discarded")
     if any(instrument.panning_type & 1 for instrument in module.instruments):
         warnings.append("enabled panning envelopes are not rendered")
     if any(instrument.vibrato_depth and instrument.vibrato_rate
@@ -449,7 +497,20 @@ def compile_xm(module: XmModule, max_orders: int | None = None) -> tuple[bytes, 
                 if cell.instrument > len(module.instruments):
                     raise XmError(f"unknown instrument {cell.instrument} at "
                                   f"{source_index}:{row_index}:{channel}")
-                row.append(_normalize_cell(cell, source_index, row_index, channel))
+                normalized = _normalize_cell(cell, source_index, row_index, channel)
+                if normalized.effect == 0x0B and normalized.parameter >= order_count:
+                    raise XmError(
+                        f"position jump B{normalized.parameter:02X} exceeds {order_count} orders "
+                        f"at {source_index}:{row_index}:{channel}")
+                if normalized.effect == 0x0D:
+                    break_row = (normalized.parameter >> 4) * 10 + (normalized.parameter & 15)
+                    if normalized.parameter & 15 > 9:
+                        raise XmError(f"invalid pattern break D{normalized.parameter:02X} at "
+                                      f"{source_index}:{row_index}:{channel}")
+                    if break_row > 63:
+                        raise XmError(f"pattern break D{normalized.parameter:02X} exceeds row 63 at "
+                                      f"{source_index}:{row_index}:{channel}")
+                row.append(normalized)
             row.extend(Cell() for _ in range(10 - len(row)))
             normalized_rows.append(tuple(row))
         patterns.append(tuple(normalized_rows))

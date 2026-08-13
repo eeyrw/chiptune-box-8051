@@ -169,8 +169,8 @@ build uses:
 
 | Resource | Used | Available |
 |---|---:|---:|
-| program Flash | 58,699 bytes | 65,024-byte programmed region |
-| XRAM | 2,871 bytes | 3,072 bytes |
+| program Flash | 59,223 bytes | 65,024-byte programmed region |
+| XRAM | 2,880 bytes | 3,072 bytes |
 | absolute DATA hot state | 90 bytes | fixed at `0x21` |
 | stack | 133 bytes | starts at `0x7B` |
 | T10P score image | 29,779 bytes | internal Code Flash |
