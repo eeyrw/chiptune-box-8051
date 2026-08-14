@@ -42,6 +42,9 @@ does not parse tracker effects in real time.
 Always `make clean` after changing `.inc` files because SDCC assembly dependency
 tracking is manual.
 
+Flash size notes for TrackerPlayer (dual DPTR `ScoreFlash`, 48-byte instruments,
+status `0x31e`): `docs/TrackerPlayerSizeOptimization.md`.
+
 ## Score toolchain
 
 ```bash
@@ -56,17 +59,9 @@ reintroduce the v1 sample-timed event stream or the v2 40-byte instrument layout
 
 ## Storage
 
-Both internal and SPI backends are compiled. `storage_auto_detect()` chooses SPI
-after a valid JEDEC ID and otherwise uses `scoreList.c`. The current board may
-have no SPI NOR installed; that is not permission to remove the backend.
-
-PCB SPI data lines are crossed, so `SpiFlash.c` uses GPIO bit banging on P3.2
-(clock), P3.3 (MOSI), P3.4 (MISO), P3.5 (CS). Do not enable hardware SPI without
-physically swapping P3.3/P3.4.
-
-T10M v4 wavetable and PCM resources are an internal Code Flash feature. The ISR
-reads them directly with `MOVC`; do not add SPI reads, buffering or decoding to
-the audio hot path. Preserve the SPI backend source even though v4 rejects it.
+Score storage is **internal Code Flash only** (`scoreList.c`, `MOVC`). SPI NOR
+backend source has been removed; do not reintroduce SPI reads on the audio path
+or dual-backend storage without a board redesign.
 
 ## Hardware verification
 

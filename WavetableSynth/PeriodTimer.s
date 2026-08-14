@@ -8,9 +8,10 @@
 ;   * PWM2N is inverted by the PWMA peripheral. This ISR writes the original
 ;     unsigned sample only once, to CCR2; it must not invert a second value in
 ;     software.
-;   * Every firmware path uses register bank 0. The ISR touches A, DPTR, PSW
-;     flags and R0, and therefore saves exactly those registers. B and R1-R7
-;     are neither read nor written here or by the inline UpdateTick body.
+;   * Every firmware path uses register bank 0. The ISR touches A, DPTR, DPS,
+;     PSW flags and R0, and therefore saves exactly those. B and R1-R7 are
+;     neither read nor written here or by the inline UpdateTick body. DPS is
+;     forced to DPTR0 so dual-DPTR main-thread helpers cannot divert ISR DPTR.
 ;   * P5.5 brackets the complete assembly ISR body, including context saves and
 ;     restores, so its high pulse is a conservative execution-time measurement.
     .include "WavetableSynth.inc"
@@ -28,8 +29,11 @@ _timer_isr:
     push acc
     push dpl
     push dph
+    push 0xE3
     push psw
     push ar0
+    ; Force DPTR0 so dual-DPTR score_copy cannot leave DPS=1 across the ISR.
+    mov 0xE3,#0
 
     ; Snapshot the consumer index in R0. audioWrite may change only in the main
     ; thread, but each byte access is atomic on the 8051, so one read is enough.
@@ -91,6 +95,7 @@ audio_output$:
 timer_on_time$:
     pop ar0
     pop psw
+    pop 0xE3
     pop dph
     pop dpl
     pop acc

@@ -3,7 +3,6 @@
 #include "WavetableSynth.h"
 #include "Bsp.h"
 #include "Protocol.h"
-#include "Storage.h"
 
 MEM_XDATA(TrackerPlayer) mainPlayer;
 
@@ -14,10 +13,15 @@ void main()
 	WavetableSynthInit();
 	AudioBufferInit();
 	TrackerPlayerInit(&mainPlayer);
-	storage_auto_detect();
 	TrackerPlayerStart(&mainPlayer, TRACKER_MODE_ORDER_PLAY);
 	TrackerPlayerProcess(&mainPlayer);
-	while (AudioBufferLevel() < 192) AudioRenderProcess();
+	{
+		uint16_t guard = 0;
+		while (AudioBufferLevel() < 192 && guard < 4096) {
+			AudioRenderProcess();
+			guard++;
+		}
+	}
 	StartAudioOutput();
 
 	while (1)

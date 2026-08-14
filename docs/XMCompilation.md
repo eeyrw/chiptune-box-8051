@@ -296,19 +296,25 @@ pattern”的模块体积。
 | `1xx/2xx` pitch slide | 保留 |
 | `3xx` tone portamento | 保留（不重触发相位） |
 | `4xy` vibrato | 保留 |
-| `6xy` vib+volslide | 只保留 volume slide 为 `Axy`，vibrato 丢弃并 warning |
+| `5xy` porta+volslide | 保留（porta 用 `3xx` 记忆，参数为 volslide） |
+| `6xy` vib+volslide | 保留（真组合） |
+| `7xy` tremolo | 保留（与 vibrato 共用 speed/depth/phase） |
 | `8xx` panning | 清空，warning |
-| `9xx` sample offset | 清空，warning（总是从采样开头） |
+| `9xx` sample offset | 保留；使用 9xx 的乐器强制编为 PCM，参数按源长→PCM 长缩放 |
 | `Axy` volume slide | 保留 |
 | `Bxx` position jump | 保留；目标 order 必须在选定范围内 |
 | `Cxx` set volume | 转成 volume 字段，effect 清空 |
-| `Dxx` pattern break | 保留；十进制行号，当前上限 row 63 |
-| `E9x` retrigger | 保留 |
+| `Dxx` pattern break | 保留；十进制行号 0..255，目标 pattern 行数在 optimize 时校验 |
+| `E1x`/`E2x` | fine porta（tick 0） |
+| `E6x` | pattern loop |
+| `E9x` retrigger | 保留（恢复 keyOn+gate） |
+| `EAx`/`EBx` | fine volume（tick 0） |
 | `ECx` note cut | 保留 |
-| `EDx` note delay | 近似为 tick 0 触发，warning |
+| `EDx` note delay | 真延迟：倒计时 tick（含 pattern delay hold） |
+| `EEx` | pattern delay |
 | `E00` | 视为无操作 |
-| `Fxx` speed/BPM | 保留 |
-| 其他 | 编译失败 |
+| `Fxx` speed/BPM | 保留；BPM 运行时钳到 32..999 |
+| 其他 / 未支持 `Exx` | 编译失败 |
 
 设计原则可以记成一句话：
 
@@ -360,7 +366,9 @@ pattern，用来表示“播完结束”。编译器识别该模式后：
 T10 instrument；多采样乐器会 warning，并只保留最常用 note 映射到的那一个
 sample。
 
-### 7.2 三条资源路径
+### 7.2 资源路径（`--resource-policy`）
+
+默认 **`wave`**（体积优先）：
 
 ```text
 有 loop 且 loop_length >= 8
@@ -369,10 +377,19 @@ sample。
 无有效 loop，且采样长度 > 256
   -> 16 kHz PCM one-shot
 
-其他短采样
-  -> 仍抽成 16-point 波表（可能音色损失）
+其他短非循环采样
+  -> 仍抽成 16-point 波表（可能一直响到 cut）
 ```
 
+**`pcm`**（更像采样器，体积更大）：
+
+```text
+loop 且 8 <= loop_length <= 64 -> 波表
+更长 loop / 全部非循环        -> 16 kHz PCM one-shot
+```
+
+无论策略如何，乐器上出现非零 `9xx` 时强制 PCM。  
+默认 **不** 按 note 拆多份 PCM（`--multi-note-pcm` 可开）。  
 无采样的空乐器会得到 `gain=0` 的静音 instrument。
 
 ### 7.3 波表抽取 `_wave_table()`
@@ -562,9 +579,9 @@ instrument 1: 一个 loop 方波采样, default volume=64
 ### 10.2 有意降级（会 warning）
 
 - 单声道：panning effect / volume-column panning / panning envelope；
-- `6xx` 只留 volume slide；
-- `9xx` 总是从开头；
-- `EDx` 在 tick 0 触发；
+- `5xx`/`6xx` 为真组合效果；
+- `7xx` tremolo；`9xx` PCM offset（host 缩放）；
+- `EDx` 真 note delay；
 - volume-column fine slide 丢弃；
 - 多采样只取最常用 key zone；
 - instrument auto-vibrato 不渲染；

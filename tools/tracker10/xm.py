@@ -7,7 +7,10 @@ from dataclasses import dataclass
 
 from .format import (ENV_ENABLED, ENV_LOOP, ENV_SUSTAIN, Cell, Instrument,
                      MAX_WAVES, MODE_PCM_BASE, PCM_RATE, PcmSample, Song,
-                     encode_track)
+                     encode_track, optimize_song)
+from .effects import (DEFAULT_MULTI_NOTE_PCM, DEFAULT_RESOURCE_POLICY, DEVICE_EXX,
+                      MAX_WAVE_LOOP, RESOURCE_POLICIES, RESOURCE_POLICY_PCM,
+                      RESOURCE_POLICY_WAVE, scale_sample_offset)
 
 
 class XmError(ValueError):
@@ -319,7 +322,8 @@ def _pcm_sample(sample: XmSample, note: int) -> PcmSample:
     return PcmSample(bytes(output or (0,)))
 
 
-def _compile_instrument(instrument: XmInstrument, note: int
+def _compile_instrument(instrument: XmInstrument, note: int, force_pcm: bool = False,
+                        resource_policy: str = DEFAULT_RESOURCE_POLICY
                         ) -> tuple[Instrument, tuple[int, ...] | None, PcmSample | None]:
     if not instrument.samples:
         return Instrument(gain=0), None, None
@@ -333,18 +337,61 @@ def _compile_instrument(instrument: XmInstrument, note: int
     # instrument is selected. It is not a permanent multiplier. The compiler
     # lowers that initialization into pattern cells, leaving mixer gain at unity.
     gain = 31
-    if sample.loop_type and sample.loop_length >= 8:
-        volume, step, flags, sustain, loop_start, loop_end = _xm_envelope(instrument)
-        return (Instrument(gain=gain, relative_pitch=relative_pitch,
-                           volume_macro=volume, volume_step=step, volume_flags=flags,
-                           volume_sustain=sustain, volume_loop_start=loop_start,
-                           volume_loop_end=loop_end, fadeout=instrument.volume_fadeout),
+    volume, step, flags, sustain, loop_start, loop_end = _xm_envelope(instrument)
+    env = dict(volume_macro=volume, volume_step=step, volume_flags=flags,
+               volume_sustain=sustain, volume_loop_start=loop_start,
+               volume_loop_end=loop_end, fadeout=instrument.volume_fadeout)
+    # 9xx always needs a linear PCM stream.
+    if force_pcm and sample.values:
+        return (Instrument(gain=gain, relative_pitch=relative_pitch, **env),
+                None, _pcm_sample(sample, note))
+    if resource_policy == RESOURCE_POLICY_PCM:
+        # Prefer PCM: only short loops 8..64 become waves.
+        use_wave = bool(sample.loop_type and 8 <= sample.loop_length <= MAX_WAVE_LOOP)
+    else:
+        # Default wave-preferring: any loop >= 8 -> wave; non-looped len>256 -> PCM;
+        # short non-looped stays a 16-point wave (may sustain until cut).
+        if sample.loop_type and sample.loop_length >= 8:
+            use_wave = True
+        elif len(sample.values) > 256:
+            use_wave = False
+        else:
+            use_wave = True
+    if use_wave:
+        return (Instrument(gain=gain, relative_pitch=relative_pitch, **env),
                 _wave_table(sample), None)
+    return (Instrument(gain=gain, relative_pitch=relative_pitch, **env),
+            None, _pcm_sample(sample, note))
 
-    if len(sample.values) > 256:
-        return Instrument(gain=gain), None, _pcm_sample(sample, note)
-    return Instrument(gain=gain, relative_pitch=relative_pitch), _wave_table(sample), None
 
+
+def _scale_pattern_offsets(patterns, instruments, pcm_samples, pcm_source_lens):
+    """Rewrite 9xx parameters from source-sample units into compiled PCM units."""
+    if not pcm_source_lens:
+        return patterns
+    out = []
+    for pattern in patterns:
+        rows = []
+        active = [0] * 10
+        for row in pattern:
+            cells = []
+            for ch, cell in enumerate(row):
+                if cell.instrument:
+                    active[ch] = cell.instrument
+                if cell.effect == 9 and cell.parameter and active[ch]:
+                    ins = instruments[active[ch] - 1]
+                    if MODE_PCM_BASE <= ins.mode < MODE_PCM_BASE + len(pcm_samples):
+                        pidx = ins.mode - MODE_PCM_BASE
+                        scaled = scale_sample_offset(
+                            cell.parameter, pcm_source_lens[pidx],
+                            len(pcm_samples[pidx].data))
+                        if scaled != cell.parameter:
+                            cell = Cell(cell.note, cell.instrument, cell.volume,
+                                        cell.effect, scaled)
+                cells.append(cell)
+            rows.append(tuple(cells))
+        out.append(tuple(rows))
+    return out
 
 def _normalize_cell(cell: Cell, pattern: int, row: int, channel: int) -> Cell:
     volume = 0
@@ -359,8 +406,13 @@ def _normalize_cell(cell: Cell, pattern: int, row: int, channel: int) -> Cell:
         elif 0x70 <= cell.volume <= 0x7F:
             volume_effect = 0x0A
             volume_parameter = (cell.volume & 15) << 4
-        elif 0x80 <= cell.volume <= 0x9F:
-            pass  # Fine volume slides are an explicitly reported approximation.
+        elif 0x80 <= cell.volume <= 0x8F:
+            # Fine volume up -> EAx when no main effect competes.
+            volume_effect = 0x0E
+            volume_parameter = 0xA0 | (cell.volume & 15)
+        elif 0x90 <= cell.volume <= 0x9F:
+            volume_effect = 0x0E
+            volume_parameter = 0xB0 | (cell.volume & 15)
         elif 0xC0 <= cell.volume <= 0xCF:
             volume = 0  # Mono output deliberately discards volume-column panning.
         else:
@@ -368,10 +420,8 @@ def _normalize_cell(cell: Cell, pattern: int, row: int, channel: int) -> Cell:
     effect, parameter = cell.effect, cell.parameter
     if effect == 8:
         effect = parameter = 0  # Mono output deliberately discards panning.
-    elif effect == 6:
-        effect = 0x0A  # Keep the volume slide; discarded vibrato is reported.
     elif effect == 9:
-        effect = parameter = 0  # Discarded sample offset is reported.
+        pass  # 9xx sample offset is applied on PCM triggers in the device VM.
     elif effect == 0x0C:
         if parameter > 64:
             raise XmError(f"invalid set-volume effect C{parameter:02X} at {pattern}:{row}:{channel}")
@@ -382,11 +432,9 @@ def _normalize_cell(cell: Cell, pattern: int, row: int, channel: int) -> Cell:
     elif effect == 0x0E:
         if parameter == 0:
             effect = parameter = 0  # Empty legacy E00 has no FT2 playback effect.
-        elif parameter >> 4 == 0x0D:
-            effect = parameter = 0  # Note delay is approximated at tick zero.
-        elif parameter >> 4 not in (9, 0x0C):
+        elif parameter >> 4 not in DEVICE_EXX:
             raise XmError(f"unsupported extended effect E{parameter:02X} at {pattern}:{row}:{channel}")
-    elif effect not in (0, 1, 2, 3, 4, 0x0A, 0x0B, 0x0D, 0x0F):
+    elif effect not in (0, 1, 2, 3, 4, 5, 6, 7, 0x0A, 0x0B, 0x0D, 0x0F):
         raise XmError(f"unsupported effect {effect:X}{parameter:02X} at {pattern}:{row}:{channel}")
     if volume_effect and not (effect or parameter):
         effect, parameter = volume_effect, volume_parameter
@@ -436,18 +484,16 @@ def analyze_xm(module: XmModule) -> dict:
         warnings.append(f"module has {module.channels} channels; Tracker10 accepts at most 10")
     if effects["8xx"] or volume_commands["Cx"]:
         warnings.append("panning commands are discarded because hardware output is mono")
-    if effects["6xx"]:
-        warnings.append(f"{effects['6xx']} vibrato-volume slides keep only the volume slide")
+    # 5xx/6xx/7xx are implemented in the device VM.
     if effects["9xx"]:
-        warnings.append(f"{effects['9xx']} sample-offset commands start samples from the beginning")
-    note_delays = sum(1 for pattern_index in module.orders
-                      for row in module.patterns[pattern_index] for cell in row
-                      if cell.effect == 0x0E and cell.parameter >> 4 == 0x0D)
-    if note_delays:
-        warnings.append(f"{note_delays} note-delay commands trigger at tick zero")
+        warnings.append(
+            f"{effects['9xx']} sample-offset commands apply to PCM voices "
+            f"(looped sources used with 9xx are compiled as PCM)")
+    # EDx is implemented in the device VM; no approximation warning.
     fine_volume = volume_commands["8x"] + volume_commands["9x"]
     if fine_volume:
-        warnings.append(f"{fine_volume} volume-column fine slides are discarded")
+        warnings.append(
+            f"{fine_volume} volume-column fine slides lower to EAx/EBx when no main effect")
     conflicting_slides = 0
     for pattern_index in module.orders:
         for row in module.patterns[pattern_index]:
@@ -485,11 +531,15 @@ def analyze_xm(module: XmModule) -> dict:
     }
 
 
-def compile_xm(module: XmModule, max_orders: int | None = None) -> tuple[bytes, dict]:
+def compile_xm(module: XmModule, max_orders: int | None = None,
+               resource_policy: str = DEFAULT_RESOURCE_POLICY,
+               multi_note_pcm: bool = DEFAULT_MULTI_NOTE_PCM) -> tuple[bytes, dict]:
     if module.channels > 10:
         raise XmError(f"XM has {module.channels} channels; maximum is 10")
     if max_orders is not None and max_orders < 1:
         raise XmError("max-orders must be at least one")
+    if resource_policy not in RESOURCE_POLICIES:
+        raise XmError(f"unknown resource policy {resource_policy!r}")
     order_count = len(module.orders) if max_orders is None else min(max_orders, len(module.orders))
     selected_orders = module.orders[:order_count]
     terminal_sentinel = max_orders is None and _has_terminal_restart_sentinel(module)
@@ -533,8 +583,8 @@ def compile_xm(module: XmModule, max_orders: int | None = None) -> tuple[bytes, 
                     if normalized.parameter & 15 > 9:
                         raise XmError(f"invalid pattern break D{normalized.parameter:02X} at "
                                       f"{source_index}:{row_index}:{channel}")
-                    if break_row > 63:
-                        raise XmError(f"pattern break D{normalized.parameter:02X} exceeds row 63 at "
+                    if break_row > 255:
+                        raise XmError(f"pattern break D{normalized.parameter:02X} exceeds row 255 at "
                                       f"{source_index}:{row_index}:{channel}")
                 row.append(normalized)
             row.extend(Cell() for _ in range(10 - len(row)))
@@ -548,34 +598,124 @@ def compile_xm(module: XmModule, max_orders: int | None = None) -> tuple[bytes, 
         restart = min(module.restart, order_count - 1)
     waves: list[tuple[int, ...]] = []
     pcm_samples: list[PcmSample] = []
-    instruments = []
+    pcm_source_lens: list[int] = []
+    force_pcm = [False] * len(module.instruments)
+    active = [0] * module.channels
+    for pattern_index in selected_orders:
+        for row in module.patterns[pattern_index]:
+            for channel, cell in enumerate(row):
+                if cell.instrument and cell.instrument <= len(force_pcm):
+                    active[channel] = cell.instrument
+                if cell.effect == 9 and cell.parameter and active[channel]:
+                    force_pcm[active[channel] - 1] = True
+
+    instruments: list[Instrument] = []
+    pcm_note_map: dict[tuple[int, int], int] = {}
+    source_to_ins: dict[int, int] = {}
+    multi_pcm_sources: set[int] = set()
+
+    def _append_pcm(pcm: PcmSample, source_len: int) -> int:
+        pidx = next(
+            (i for i, (blob, length) in enumerate(zip(pcm_samples, pcm_source_lens))
+             if blob == pcm and length == source_len),
+            None)
+        if pidx is None:
+            pcm_samples.append(pcm)
+            pcm_source_lens.append(source_len)
+            pidx = len(pcm_samples) - 1
+        if len(pcm_samples) > 0x7E:
+            raise XmError("song needs more than 126 PCM samples")
+        return pidx
+
     for index, source in enumerate(module.instruments):
-        note = note_counts[index].most_common(1)[0][0] if note_counts[index] else 49
-        instrument, wave, pcm = _compile_instrument(source, note)
-        if wave is not None:
-            if wave not in waves:
-                if len(waves) >= MAX_WAVES:
-                    raise XmError("song needs more than sixteen distinct wavetables")
-                waves.append(wave)
-            instrument = Instrument(**{**instrument.__dict__, "mode": waves.index(wave)})
-        elif pcm is not None:
-            if pcm not in pcm_samples:
-                pcm_samples.append(pcm)
-            instrument = Instrument(**{**instrument.__dict__,
-                                       "mode": MODE_PCM_BASE + pcm_samples.index(pcm)})
-        instruments.append(instrument)
+        counts = note_counts[index]
+        default_note = counts.most_common(1)[0][0] if counts else 49
+        probe, _wave, probe_pcm = _compile_instrument(
+            source, default_note, force_pcm=force_pcm[index],
+            resource_policy=resource_policy)
+        is_multi = bool(multi_note_pcm and probe_pcm is not None and len(counts) > 1)
+        notes = sorted(counts) if is_multi else [default_note]
+        if is_multi:
+            multi_pcm_sources.add(index + 1)
+        first_id = None
+        for note in notes:
+            instrument, wave, pcm = _compile_instrument(
+                source, note, force_pcm=force_pcm[index],
+                resource_policy=resource_policy)
+            if wave is not None:
+                if wave not in waves:
+                    if len(waves) >= MAX_WAVES:
+                        raise XmError("song needs more than sixteen distinct wavetables")
+                    waves.append(wave)
+                instrument = Instrument(**{**instrument.__dict__, "mode": waves.index(wave)})
+            elif pcm is not None:
+                sample_index = (source.keymap[max(0, min(95, note - 1))]
+                                if source.keymap else 0)
+                sample = source.samples[min(sample_index, len(source.samples) - 1)]
+                pidx = _append_pcm(pcm, len(sample.values))
+                instrument = Instrument(**{**instrument.__dict__,
+                                           "mode": MODE_PCM_BASE + pidx})
+            if len(instruments) >= 255:
+                raise XmError("song needs more than 255 instruments after PCM note split")
+            instruments.append(instrument)
+            new_id = len(instruments)
+            if first_id is None:
+                first_id = new_id
+            if is_multi:
+                pcm_note_map[(index + 1, note)] = new_id
+            else:
+                source_to_ins[index + 1] = new_id
+        if not is_multi and first_id is not None:
+            source_to_ins[index + 1] = first_id
+
+    if multi_pcm_sources or any(source_to_ins.get(i, i) != i for i in source_to_ins):
+        rewritten = []
+        for pattern in patterns:
+            new_rows = []
+            active_src = [0] * 10
+            for row in pattern:
+                new_cells = []
+                for ch, cell in enumerate(row):
+                    if cell.instrument:
+                        active_src[ch] = cell.instrument
+                    src = active_src[ch]
+                    new_ins = cell.instrument
+                    if src in multi_pcm_sources:
+                        if 1 <= cell.note <= 96:
+                            new_ins = pcm_note_map.get((src, cell.note))
+                            if new_ins is None:
+                                common = note_counts[src - 1].most_common(1)[0][0]
+                                new_ins = pcm_note_map[(src, common)]
+                        elif cell.instrument:
+                            common = note_counts[src - 1].most_common(1)[0][0]
+                            new_ins = pcm_note_map[(src, common)]
+                    elif cell.instrument:
+                        new_ins = source_to_ins.get(cell.instrument, cell.instrument)
+                    if new_ins and new_ins != cell.instrument:
+                        new_cells.append(Cell(cell.note, new_ins, cell.volume,
+                                              cell.effect, cell.parameter))
+                    else:
+                        new_cells.append(cell)
+                new_rows.append(tuple(new_cells))
+            rewritten.append(tuple(new_rows))
+        patterns = rewritten
+
     if not waves:
         waves.append((96,) * 8 + (-96,) * 8)
-    song = Song(tuple(pattern_map[x] for x in selected_orders), restart, module.speed, module.bpm,
-                tuple(patterns), tuple(instruments), amiga_effects=not module.linear_frequency,
-                waves=tuple(waves), pcm_samples=tuple(pcm_samples))
+    patterns = _scale_pattern_offsets(patterns, instruments, pcm_samples, pcm_source_lens)
+    song = optimize_song(Song(
+        tuple(pattern_map[x] for x in selected_orders), restart, module.speed, module.bpm,
+        tuple(patterns), tuple(instruments), amiga_effects=not module.linear_frequency,
+        waves=tuple(waves), pcm_samples=tuple(pcm_samples)))
     track = encode_track(song, loop=max_orders is None and not terminal_sentinel)
-    cells = sum(1 for pattern in patterns for row in pattern for cell in row if cell != Cell())
+    cells = sum(1 for pattern in song.patterns for row in pattern for cell in row if cell != Cell())
     return track, {
         "title": module.title, "channels": module.channels, "orders": order_count,
-        "patterns": len(patterns), "instruments": len(song.instruments),
+        "patterns": len(song.patterns), "instruments": len(song.instruments),
         "waves": len(song.waves), "pcm_samples": len(song.pcm_samples),
         "pcm_bytes": sum(len(sample.data) for sample in song.pcm_samples),
         "loop": max_orders is None and not terminal_sentinel,
+        "resource_policy": resource_policy,
+        "multi_note_pcm": multi_note_pcm,
         "semantic_cells": cells, "track_bytes": len(track),
     }

@@ -101,7 +101,7 @@ Every pattern has an eight-byte directory entry:
 | 6 | 2 | row count, `1..256` |
 
 Pattern rows are decoded sequentially. Random row seeking is deliberately not
-required, which keeps both the internal-Flash and bit-banged SPI readers simple.
+required, which keeps the internal Code Flash reader simple.
 
 ### 4.3 Row encoding
 
@@ -170,8 +170,7 @@ neither rate conversion, interpolation, normalization nor end-of-sample fading.
 
 Both resource types are deliberately internal-Code-Flash-only in v4. The ISR
 uses `MOVC` directly and never performs SPI I/O, buffer filling or audio
-decoding. The repository retains its SPI storage backend, but firmware rejects
-a v4 track opened from that backend rather than violating the real-time path.
+decoding. SPI score storage is not supported.
 
 ## 6. Compiled instruments
 
@@ -305,20 +304,56 @@ rounding drift. Speed controls ticks per row and does not enter this calculation
 | `2xx` | Pitch slide down, linear or Amiga-period scaled | Yes |
 | `3xx` | Tone portamento to note target | Yes |
 | `4xy` | Sine vibrato speed x, depth y | Nibble-wise |
-| `6xy` | Host-lowered to `Axy`; vibrato is reported as discarded | Yes, as `Axy` |
-| `9xx` | Host discards sample offset and reports the approximation | No |
+| `5xy` | Tone porta + volume slide each tick | Porta + volslide |
+| `6xy` | Vibrato + volume slide each tick | Vib + volslide |
+| `7xy` | Tremolo (volume LFO; reuses vibrato speed/depth/phase storage) | Nibble-wise |
+| `9xx` | Sample offset: on PCM trigger skip `param*256` samples (0 reuses memory) | Yes |
 | `Axy` | Volume slide; up wins when x is nonzero | Yes |
 | `Bxx` | Position jump to order xx after the current row | No |
 | `Dxx` | Pattern break to decimal row xx in the next/jump order | No |
+| `E1x` / `E2x` | Fine porta up/down once on tick 0; same step model as `1xx`/`2xx` with parameter `x` | Yes (nibble) |
+| `E6x` | Pattern loop: `E60` sets start row, `E6x` (`x>0`) repeats from start `x` times | Global count |
 | `E9x` | Retrigger oscillator and instrument macros every x ticks | No |
+| `EAx` / `EBx` | Fine volume up/down once on tick 0 | Yes (nibble) |
 | `ECx` | Cut the note at tick x | No |
-| `EDx` | Host triggers at tick zero and reports the approximation | No |
+| `EDx` | Note delay: trigger note/instrument after x ticks (countdown across holds) | No (per-row) |
+| `EEx` | Pattern delay: hold the current row for `x` extra speed periods without re-decoding | Last channel wins |
 | `Fxx` | Speed when `< 0x20`, otherwise BPM | No |
 
 Effect movement begins on tick 1. A zero parameter for effects with memory reuses
 the previous nonzero value. `400` therefore continues both remembered vibrato
 speed and depth. Panning effect `8xx` and volume-column `Cx` are deliberately
 discarded by the host because the hardware output is mono.
+
+Pattern loop (`E6x`) uses one global start row and count for the active pattern.
+`E60` records the current row as the loop start (default start is row 0). `E6x`
+with `x>0` begins or continues the loop: the first encounter loads the count and
+jumps after the row; later encounters decrement and jump until the count reaches
+zero. A loop jump reloads the current pattern stream and seeks to the start row,
+and overrides `Bxx`/`Dxx` on that same row end. Leaving the pattern (natural end
+or position jump/break) clears the loop state. Nested loops are not supported.
+
+Pattern delay (`EEx`) extends the current row by `x` additional full `speed`
+periods. Notes and instruments are decoded only on the first period; subsequent
+hold periods keep channel effect state and continue tick-based effects without
+re-reading the row. The last `EEx` on the row wins.
+
+Sample offset (`9xx`) is applied when a PCM voice is retriggered: the compiled
+PCM stream is started `param * 256` samples in, clamped to the sample length.
+Hosts compile any instrument that uses `9xx` as PCM (even if the source looped)
+so the offset has a linear stream to index. Wavetable-only instruments ignore
+offset. Parameter memory applies: `900` reuses the previous nonzero offset for
+that channel; a note without `9xx` starts at offset zero.
+
+Note delay (`EDx`) defers note and instrument application by `x` tracker ticks
+using a per-channel countdown that continues through pattern-delay hold periods.
+Tone portamento targets are not delayed. If `x` is greater than or equal to the
+row duration, the note does not sound.
+
+Fine portamento (`E1x`/`E2x`) and fine volume (`EAx`/`EBx`) apply once after the
+row's note and volume fields on tick 0. A zero nibble reuses the previous nonzero
+nibble for that direction. Pitch steps use the same linear or Amiga scale as
+`1xx`/`2xx` with parameter `x`. Volume is clamped to `0..64`.
 
 When header flag bit 1 is clear, slide parameters use `xx/16` semitone per
 nonzero tick and vibrato depth uses the normalized linear model. When bit 1 is

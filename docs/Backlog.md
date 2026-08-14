@@ -29,7 +29,10 @@ The evidence, resource-conflict matrix and measurement procedure are in
 
 ## MOD input support
 
-Status: planned
+Status: Phase 1 and practical Phase 2 **done** (2026-08-14): `mod.py`, CLI
+auto-detect, batch scan, device effects including `5/6/7/9/E6/ED/EE`, host
+options `--resource-policy` / `--multi-note-pcm`. 15-sample Soundtracker and
+unsupported `Exx` (e.g. `E4x`) remain open.
 
 Goal: compile common ProTracker-compatible MOD files into the existing T10P /
 T10M v4 representation. MOD remains a host-side input format; the MCU will not
@@ -108,3 +111,64 @@ required.
 - At least one representative four-channel MOD passes host reference comparison,
   clean firmware link, board flash and a full active-playback diagnostic window
   with no parser error, ISR overrun or growing underrun count.
+
+### Remaining open MOD/XM items
+
+- 15-sample Soundtracker modules without a signature;
+- vibrato waveform `E4x` and other unsupported `Exx` subcommands (policy TBD);
+- further golden traces for `E6x`/`EEx` multi-channel and delay+break cases.
+
+Implemented and no longer open: true `EDx`, combined `5xx`/`6xx`, tremolo
+`7xx`, sample offset `9xx`, pattern loop `E6x`, pattern delay `EEx`. PCM
+defaults to most-common-note bake; optional `--multi-note-pcm` and
+`--resource-policy wave|pcm` (default `wave`).
+
+## Host / VM audit fixes (2026-08-14)
+
+Status: done for items 1–7 below (tests green). Deferred items remain open.
+
+### 1. High — Dxx validation and optimize safety — done
+
+- Dropped hard `break_row > 63`; allow 0..255 with digit validation.
+- `optimize_song` uses per-destination `min_rows` from Dxx/Bxx; fails if the
+  target row is past the destination pattern length.
+
+### 2. High — XM resource policy aligned with MOD — done
+
+- Wave only when `8 <= loop_length <= 64` and not force-PCM.
+- Longer loops and all non-looped samples → 16 kHz PCM.
+- Force-PCM still applies for instruments that use nonzero `9xx`.
+
+### 3. High — host reference matches device 9xx — done
+
+- PCM triggers include skip (`param * 256` when use-offset armed).
+- Any `9xx` arms use-offset; a normal note without `9xx` clears it.
+
+### 4. Medium — force_pcm keeps XM envelope; PCM source_len pairing — done
+
+- Forced PCM still attaches XM volume envelope and fadeout.
+- PCM dedup keys on `(pcm_bytes, source_len)` so 9xx scaling stays correct.
+
+### 5. Medium — fine-effect memory in reference matches device — done
+
+- Reference reuses `slide_up` / `slide_down` / `volume_slide` for E1/E2/EA/EB.
+
+### 6. Medium — device E9x reopens gate — done
+
+- `E9x` sets `keyOn` and `gate` before pending reset.
+
+### 7. Medium — docs and tests — partial / done core
+
+- UsingMOD/UsingXM effect and resource notes updated.
+- Regression tests for Dxx destination rows, invalid Dxx, and 9xx scale helper.
+- XMCompilation/XMCollection may still have older wording in places.
+
+### Deferred follow-ups (2026-08-14 cont.)
+
+- **Done:** XM/MOD both hard-fail unsupported `Exx` via shared `DEVICE_EXX`
+  (`E00` still clears). Runtime `Fxx` BPM clamped to 32..999 on device and in
+  host reference. Stale XMCompilation/XMCollection effect notes updated.
+- Still open: full golden traces for E6x/EEx multi-channel edge cases;
+  15-sample Soundtracker; vibrato waveform `E4x` (still rejected).
+- Static XDATA locals remain OK only for single-threaded main; do not re-enter
+  the VM.

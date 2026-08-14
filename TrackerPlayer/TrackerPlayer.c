@@ -1,7 +1,7 @@
 #include <stddef.h>
 #include <string.h>
 #include "TrackerPlayer.h"
-#include "SpiFlash.h"
+#include "ScoreFlash.h"
 
 #define T10P_HEADER_SIZE 16UL
 #define T10P_ENTRY_SIZE 8UL
@@ -31,8 +31,10 @@ static MEM_XDATA(TrackerControlEvent) decodeEvent;
 
 typedef char TrackerEventSizeMustMatchAsm[(sizeof(TrackerControlEvent) == 57) ? 1 : -1];
 typedef char TrackerQueueHeadMustMatchAsm[(offsetof(TrackerControlQueue, head) == 228) ? 1 : -1];
+typedef char TrackerInstrumentSizeMustMatchDisk[(sizeof(TrackerInstrumentState) == 48) ? 1 : -1];
+/* +20 B from 10x 48-byte instruments (was 46). Keep AudioRender.inc in sync. */
 typedef char TrackerVmStatusMustMatchAsm[(offsetof(TrackerPlayer, vm)
-                                        + offsetof(TrackerVm, status) == 0x326) ? 1 : -1];
+                                        + offsetof(TrackerVm, status) == 0x31e) ? 1 : -1];
 static MEM_CODE(int8_t) vibratoSine[16] = {
       0,  49,  90, 117, 127, 117,  90,  49,
       0, -49, -90,-117,-127,-117, -90, -49
@@ -74,79 +76,51 @@ static uint8_t queue_commit(MEM_XDATA(TrackerControlEvent) *event)
     return 1;
 }
 
-static uint8_t read8(MEM_XDATA(TrackerVm) *vm, MEM_XDATA(uint8_t) *value)
+/* Pattern stream is host-bounded; only fail past patternEnd. */
+static uint8_t read8(MEM_XDATA(TrackerVm) *vm, uint8_t *value)
 {
-    return stream_read(&vm->patternStream, value);
-}
-
-static uint8_t read16(MEM_XDATA(TrackerVm) *vm, MEM_XDATA(uint16_t) *value)
-{
-    static MEM_XDATA(uint8_t) lo;
-    static MEM_XDATA(uint8_t) hi;
-    if (!read8(vm, &lo) || !read8(vm, &hi)) return 0;
-    *value = (uint16_t)lo | ((uint16_t)hi << 8);
+    if (vm->patternPos >= vm->patternEnd) return 0;
+    *value = score_u8(vm->patternPos++);
     return 1;
 }
+
+static uint8_t read16(MEM_XDATA(TrackerVm) *vm, uint16_t *value)
+{
+    uint8_t lo;
+    if (!read8(vm, &lo) || vm->patternPos >= vm->patternEnd) return 0;
+    *value = (uint16_t)lo | ((uint16_t)score_u8(vm->patternPos++) << 8);
+    return 1;
+}
+
+#define track_u8(vm, off)  score_u8((uint16_t)((vm)->trackBase + (uint16_t)(off)))
+#define track_u16(vm, off) score_u16((uint16_t)((vm)->trackBase + (uint16_t)(off)))
+#define track_u32(vm, off) score_u32((uint16_t)((vm)->trackBase + (uint16_t)(off)))
 
 static void default_instrument(MEM_XDATA(TrackerInstrumentState) *instrument)
 {
     memset(instrument, 0, sizeof(*instrument));
     instrument->gain = 20;
-    instrument->volumeLength = 1;
-    instrument->volumeStep = 1;
-    instrument->volumeSustain = 0xFF;
-    instrument->volumeLoopStart = 0xFF;
-    instrument->volumeLoopEnd = 0xFF;
-    instrument->pitchLength = 1;
-    instrument->pitchLoop = 0;
+    instrument->volumeLength = instrument->volumeStep = instrument->pitchLength = 1;
+    instrument->volumeSustain = instrument->volumeLoopStart = instrument->volumeLoopEnd = 0xFF;
     instrument->volumeMacro[0] = 32;
 }
 
+/* Host compile validates instrument records; runtime only bounds the index. */
 static uint8_t load_instrument(MEM_XDATA(TrackerVm) *vm, uint8_t number,
                                MEM_XDATA(TrackerInstrumentState) *instrument)
 {
-    static MEM_XDATA(uint32_t) offset;
-    static MEM_XDATA(uint8_t) i;
+    uint16_t addr;
+    uint8_t n;
     if (!number) {
         default_instrument(instrument);
         return 1;
     }
     if (number > vm->instrumentCount) return 0;
-    offset = vm->instrumentOffset + (uint32_t)(number - 1) * T10_INSTRUMENT_SIZE;
-    instrument->mode = stream_u8(&vm->trackStream, offset);
-    instrument->gain = stream_u8(&vm->trackStream, offset + 1);
-    instrument->relativePitch = (int16_t)stream_u16(&vm->trackStream, offset + 2);
-    instrument->volumeLength = stream_u8(&vm->trackStream, offset + 4);
-    instrument->volumeStep = stream_u8(&vm->trackStream, offset + 5);
-    instrument->volumeFlags = stream_u8(&vm->trackStream, offset + 6);
-    instrument->volumeSustain = stream_u8(&vm->trackStream, offset + 7);
-    instrument->volumeLoopStart = stream_u8(&vm->trackStream, offset + 8);
-    instrument->volumeLoopEnd = stream_u8(&vm->trackStream, offset + 9);
-    instrument->pitchLength = stream_u8(&vm->trackStream, offset + 10);
-    instrument->pitchLoop = stream_u8(&vm->trackStream, offset + 11);
-    instrument->fadeout = stream_u16(&vm->trackStream, offset + 12);
-    if (!((instrument->mode < vm->waveCount)
-          || instrument->mode == WT_MODE_NOISE_LONG
-          || instrument->mode == WT_MODE_NOISE_SHORT
-          || (instrument->mode >= WT_MODE_PCM_BASE
-              && instrument->mode < (uint8_t)(WT_MODE_PCM_BASE + vm->pcmCount)))
-     || instrument->gain > 31
-     || !instrument->volumeLength || instrument->volumeLength > TRACKER_MACRO_LENGTH || !instrument->volumeStep
-     || !instrument->pitchLength || instrument->pitchLength > TRACKER_MACRO_LENGTH
-     || (instrument->volumeFlags & 0xF8)
-     || ((instrument->volumeFlags & TRACKER_ENV_SUSTAIN)
-         ? instrument->volumeSustain >= instrument->volumeLength : instrument->volumeSustain != 0xFF)
-     || ((instrument->volumeFlags & TRACKER_ENV_LOOP)
-         ? (instrument->volumeLoopStart > instrument->volumeLoopEnd
-            || instrument->volumeLoopEnd >= instrument->volumeLength)
-         : (instrument->volumeLoopStart != 0xFF || instrument->volumeLoopEnd != 0xFF))
-     || stream_u16(&vm->trackStream, offset + 14)
-     || (instrument->pitchLoop != 0xFF && instrument->pitchLoop >= instrument->pitchLength)) return 0;
-    for (i = 0; i < TRACKER_MACRO_LENGTH; i++) {
-        instrument->volumeMacro[i] = stream_u8(&vm->trackStream, offset + 16 + i);
-        instrument->pitchMacro[i] = (int8_t)stream_u8(&vm->trackStream, offset + 32 + i);
-        if (instrument->volumeMacro[i] > 32) return 0;
-    }
+    n = (uint8_t)(number - 1);
+    /* 48 = 32+16: avoid SDCC __mulint. */
+    addr = (uint16_t)(vm->trackBase + vm->instrumentOffset + ((uint16_t)n << 5)
+                    + ((uint16_t)n << 4));
+    score_copy48_xdata(addr, (uint8_t __xdata *)instrument);
     return 1;
 }
 
@@ -155,21 +129,21 @@ static uint8_t load_pattern(MEM_XDATA(TrackerVm) *vm, uint8_t pattern)
     uint32_t entry, offset;
     uint16_t size;
     if (pattern >= vm->patternCount) { trackerLastError = 0x91; return 0; }
-    entry = vm->patternDirectoryOffset + (uint32_t)pattern * T10_PATTERN_ENTRY_SIZE;
-    offset = stream_u32(&vm->trackStream, entry);
-    size = stream_u16(&vm->trackStream, entry + 4);
-    vm->patternRows = stream_u16(&vm->trackStream, entry + 6);
-    if (!vm->patternRows || offset < T10M_HEADER_SIZE || offset > vm->trackSize
-     || !size || size > vm->trackSize - offset) { trackerLastError = 0x92; return 0; }
-    stream_sub(&vm->patternStream, &vm->trackStream, offset, size);
+    entry = vm->patternDirectoryOffset + ((uint32_t)pattern << 3);
+    offset = track_u32(vm, (uint16_t)(entry));
+    size = track_u16(vm, (uint16_t)(entry + 4));
+    vm->patternRows = track_u16(vm, (uint16_t)(entry + 6));
+    if (!vm->patternRows || !size) { trackerLastError = 0x92; return 0; }
+    vm->patternPos = (uint16_t)(vm->trackBase + offset);
+    vm->patternEnd = (uint16_t)(vm->patternPos + size);
     vm->row = 0;
     return 1;
 }
 
 static uint8_t load_order(MEM_XDATA(TrackerVm) *vm)
 {
-    uint32_t orderOffset = stream_u32(&vm->trackStream, 12);
-    return load_pattern(vm, stream_u8(&vm->trackStream, orderOffset + vm->order));
+    uint32_t orderOffset = track_u32(vm, (uint16_t)(12));
+    return load_pattern(vm, track_u8(vm, (uint16_t)(orderOffset + vm->order)));
 }
 
 static uint8_t seek_pattern_row(MEM_XDATA(TrackerVm) *vm, uint8_t target)
@@ -179,10 +153,10 @@ static uint8_t seek_pattern_row(MEM_XDATA(TrackerVm) *vm, uint8_t target)
     static MEM_XDATA(uint16_t) changed;
     static MEM_XDATA(uint8_t) fields;
     while (vm->row < target) {
-        if (!read16(vm, &changed) || (changed & 0xFC00)) { trackerLastError = 0x81; return 0; }
+        if (!read16(vm, &changed)) { trackerLastError = 0x81; return 0; }
         for (channel = 0; channel < WT_VOICE_COUNT; channel++) {
             if (!(changed & ((uint16_t)1 << channel))) continue;
-            if (!read8(vm, &mask) || !mask || (mask & 0xF0)) { trackerLastError = 0x82; return 0; }
+            if (!read8(vm, &mask)) { trackerLastError = 0x82; return 0; }
             fields = ((mask & CELL_NOTE) ? 1 : 0) + ((mask & CELL_INSTRUMENT) ? 1 : 0)
                    + ((mask & CELL_VOLUME) ? 1 : 0) + ((mask & CELL_EFFECT) ? 2 : 0);
             while (fields--) {
@@ -197,28 +171,121 @@ static uint8_t seek_pattern_row(MEM_XDATA(TrackerVm) *vm, uint8_t target)
 static void remember_effect(MEM_XDATA(TrackerChannelState) *channel)
 {
     uint8_t parameter = channel->parameter;
-    switch (channel->effect) {
-    case 1:
+    uint8_t effect = channel->effect;
+    if (effect == 1) {
         if (parameter) channel->slideUp = parameter;
         channel->parameter = channel->slideUp;
-        break;
-    case 2:
+    } else if (effect == 2) {
         if (parameter) channel->slideDown = parameter;
         channel->parameter = channel->slideDown;
-        break;
-    case 3:
+    } else if (effect == 3) {
         if (parameter) channel->portaSpeed = parameter;
         channel->parameter = channel->portaSpeed;
-        break;
-    case 4:
+    } else if (effect == 4 || effect == 7) {
         if (parameter >> 4) channel->vibratoSpeed = parameter >> 4;
         if (parameter & 15) channel->vibratoDepth = parameter & 15;
         channel->parameter = (uint8_t)((channel->vibratoSpeed << 4) | channel->vibratoDepth);
-        break;
-    case 0x0A:
+    } else if (effect == 5 || effect == 6 || effect == 0x0A) {
         if (parameter) channel->volumeSlide = parameter;
         channel->parameter = channel->volumeSlide;
-        break;
+    }
+}
+
+static void reset_pattern_loop(MEM_XDATA(TrackerVm) *vm)
+{
+    vm->loopStart = 0;
+    vm->loopCount = 0;
+    vm->loopJump = 0;
+}
+
+static uint16_t pitch_step(MEM_XDATA(TrackerVm) *vm, uint8_t index, uint8_t amount)
+{
+    static MEM_XDATA(uint8_t) noteIndex;
+    if (!amount) return 0;
+    if (!vm->amigaEffects) return (uint16_t)amount << 4;
+    noteIndex = (uint8_t)(vm->channel[index].note >> 8);
+    if (noteIndex > 128) noteIndex = 128;
+    return (uint16_t)amount * amigaSlideScale[noteIndex];
+}
+
+static void note_add(MEM_XDATA(TrackerChannelState) *channel, uint16_t step)
+{
+    channel->note = channel->note > 0xFFFFU - step ? 0xFFFFU : channel->note + step;
+}
+
+static void note_sub(MEM_XDATA(TrackerChannelState) *channel, uint16_t step)
+{
+    channel->note = channel->note > step ? channel->note - step : 1;
+}
+
+static void tone_porta(MEM_XDATA(TrackerChannelState) *channel, uint16_t step)
+{
+    if (channel->note < channel->target)
+        channel->note = channel->target - channel->note < step ? channel->target : channel->note + step;
+    else if (channel->note > channel->target)
+        channel->note = channel->note - channel->target < step ? channel->target : channel->note - step;
+}
+
+static void volume_slide(MEM_XDATA(TrackerChannelState) *channel, uint8_t parameter)
+{
+    uint8_t up = parameter >> 4;
+    uint8_t down = parameter & 15;
+    if (up) channel->volume = channel->volume + up > 64 ? 64 : channel->volume + up;
+    else channel->volume = channel->volume > down ? channel->volume - down : 0;
+}
+
+static void start_note(MEM_XDATA(TrackerChannelState) *channel, uint16_t pitch, uint8_t resetVol)
+{
+    channel->note = pitch;
+    channel->target = pitch;
+    channel->keyOn = 1;
+    channel->gate = 1;
+    channel->volumePosition = 0;
+    channel->volumeTick = 0;
+    channel->pitchPosition = 0;
+    channel->fadeout = 0x8000;
+    if (resetVol) channel->volume = 64;
+}
+
+static void service_note_delays(MEM_XDATA(TrackerVm) *vm)
+{
+    static MEM_XDATA(uint8_t) delayIndex;
+    static MEM_XDATA(uint16_t) delayBit;
+    static TrackerChannelState __xdata * __xdata delayChannel;
+    if (!vm->noteDelayMask) return;
+    for (delayIndex = 0; delayIndex < WT_VOICE_COUNT; delayIndex++) {
+        delayBit = (uint16_t)1 << delayIndex;
+        if (!(vm->noteDelayMask & delayBit)) continue;
+        if (vm->noteDelayRemain[delayIndex]) {
+            vm->noteDelayRemain[delayIndex]--;
+            continue;
+        }
+        vm->noteDelayMask &= (uint16_t)~delayBit;
+        delayChannel = &vm->channel[delayIndex];
+        if (vm->delayedInstrument[delayIndex]) {
+            if (!load_instrument(vm, vm->delayedInstrument[delayIndex],
+                                 &delayChannel->definition)) {
+                trackerLastError = 0x88;
+                return;
+            }
+            delayChannel->instrument = vm->delayedInstrument[delayIndex];
+            delayChannel->volumePosition = 0;
+            delayChannel->volumeTick = 0;
+            delayChannel->pitchPosition = 0;
+            delayChannel->fadeout = 0x8000;
+        }
+        if (vm->delayedVolume[delayIndex] != 0xFF)
+            delayChannel->volume = vm->delayedVolume[delayIndex];
+        if (vm->delayedNote[delayIndex] == 97) {
+            delayChannel->keyOn = 0;
+            if (!(delayChannel->definition.volumeFlags & TRACKER_ENV_ENABLED))
+                delayChannel->gate = 0;
+            continue;
+        }
+        start_note(delayChannel, (uint16_t)(vm->delayedNote[delayIndex] + 11) << 8,
+                   (uint8_t)(vm->delayedVolume[delayIndex] == 0xFF
+                             && vm->delayedInstrument[delayIndex]));
+        vm->pendingReset |= delayBit;
     }
 }
 
@@ -233,39 +300,59 @@ static uint8_t decode_row(MEM_XDATA(TrackerVm) *vm)
     static MEM_XDATA(uint8_t) volume;
     static MEM_XDATA(uint8_t) effect;
     static MEM_XDATA(uint8_t) parameter;
+    static MEM_XDATA(uint8_t) sub;
+    static MEM_XDATA(uint8_t) arg;
+    static MEM_XDATA(uint8_t) noteDelay;
+    static MEM_XDATA(uint8_t) hasVolume;
+    static MEM_XDATA(uint8_t) porta;
+    static MEM_XDATA(uint16_t) pitch;
     static TrackerChannelState __xdata * __xdata channel;
+
     vm->nextOrder = vm->order + 1;
     vm->nextRow = 0;
     vm->flowPending = 0;
+    vm->loopJump = 0;
+    vm->patternDelay = 0;
+    vm->noteDelayMask = 0;
     for (channelIndex = 0; channelIndex < WT_VOICE_COUNT; channelIndex++) {
         vm->channel[channelIndex].effect = 0;
         vm->channel[channelIndex].parameter = 0;
     }
-    if (!read16(vm, &changed) || (changed & 0xFC00)) { trackerLastError = 0x81; return 0; }
+    if (!read16(vm, &changed)) { trackerLastError = 0x81; return 0; }
     bit = 1;
     for (channelIndex = 0; channelIndex < WT_VOICE_COUNT; channelIndex++, bit <<= 1) {
         if (!(changed & bit)) continue;
-        if (!read8(vm, &mask) || !mask || (mask & 0xF0)) { trackerLastError = 0x82; return 0; }
+        if (!read8(vm, &mask)) { trackerLastError = 0x82; return 0; }
         note = instrument = volume = effect = parameter = 0;
         if ((mask & CELL_NOTE) && !read8(vm, &note)) { trackerLastError = 0x83; return 0; }
         if ((mask & CELL_INSTRUMENT) && !read8(vm, &instrument)) { trackerLastError = 0x84; return 0; }
         if ((mask & CELL_VOLUME) && !read8(vm, &volume)) { trackerLastError = 0x85; return 0; }
-        if ((mask & CELL_EFFECT) && (!read8(vm, &effect) || !read8(vm, &parameter))) { trackerLastError = 0x86; return 0; }
-        if ((note && (note > 97)) || volume > 64) { trackerLastError = 0x87; return 0; }
+        if ((mask & CELL_EFFECT) && (!read8(vm, &effect) || !read8(vm, &parameter))) {
+            trackerLastError = 0x86;
+            return 0;
+        }
+
         channel = &vm->channel[channelIndex];
         channel->effect = effect;
         channel->parameter = parameter;
         remember_effect(channel);
-        if (instrument) {
-            if (!load_instrument(vm, instrument, &channel->definition)) { trackerLastError = 0x88; return 0; }
-            channel->instrument = instrument;
-            channel->volumePosition = channel->volumeTick = channel->pitchPosition = 0;
-            channel->fadeout = 0x8000;
-        }
-        if (mask & CELL_VOLUME) channel->volume = volume;
+        hasVolume = (mask & CELL_VOLUME) ? 1 : 0;
+        porta = (effect == 3 || effect == 5) && channel->gate;
+        noteDelay = (effect == 0x0E && (parameter >> 4) == 0x0D) ? (uint8_t)(parameter & 15) : 0;
+
         if (effect == 0x0F && parameter) {
             if (parameter < 0x20) vm->speed = parameter;
-            else vm->bpm = parameter;
+            else {
+                vm->bpm = parameter;
+                if (vm->bpm < 32) vm->bpm = 32;
+                if (vm->bpm > 999) vm->bpm = 999;
+            }
+        }
+        if (effect == 0x09) {
+            if (parameter) vm->sampleOffset[channelIndex] = parameter;
+            vm->useSampleOffsetMask |= bit;
+        } else if (note && note != 97 && !porta) {
+            vm->useSampleOffsetMask &= (uint16_t)~bit;
         }
         if (effect == 0x0B) {
             vm->nextOrder = parameter;
@@ -273,88 +360,137 @@ static uint8_t decode_row(MEM_XDATA(TrackerVm) *vm)
         } else if (effect == 0x0D) {
             vm->nextRow = (uint8_t)((parameter >> 4) * 10 + (parameter & 15));
             vm->flowPending = 1;
-        }
-        if (note == 97) {
-            channel->keyOn = 0;
-            if (!(channel->definition.volumeFlags & TRACKER_ENV_ENABLED)) channel->gate = 0;
-        } else if (note) {
-            uint16_t pitch = (uint16_t)(note + 11) << 8;
-            if (effect == 3 && channel->gate) {
-                channel->target = pitch;
-            } else {
-                channel->note = channel->target = pitch;
-                channel->keyOn = channel->gate = 1;
-                channel->volumePosition = channel->volumeTick = channel->pitchPosition = 0;
-                channel->fadeout = 0x8000;
-                if (!(mask & CELL_VOLUME) && instrument) channel->volume = 64;
-                vm->pendingReset |= bit;
+        } else if (effect == 0x0E) {
+            sub = (uint8_t)(parameter >> 4);
+            arg = (uint8_t)(parameter & 15);
+            if (sub == 0x0E) vm->patternDelay = arg;
+            else if (sub == 0x06) {
+                if (!arg) {
+                    if (vm->row > 255) { trackerLastError = 0x95; return 0; }
+                    vm->loopStart = (uint8_t)vm->row;
+                } else if (!vm->loopCount) {
+                    vm->loopCount = arg;
+                    vm->loopJump = 1;
+                } else if (--vm->loopCount) {
+                    vm->loopJump = 1;
+                }
             }
         }
-        if (effect == 0x0E && parameter == 0xC0) {
-            channel->keyOn = 0;
-            channel->gate = 0;
+
+        if (note && note != 97 && noteDelay && !porta) {
+            vm->noteDelayMask |= bit;
+            vm->noteDelayRemain[channelIndex] = noteDelay;
+            vm->delayedNote[channelIndex] = note;
+            vm->delayedInstrument[channelIndex] = instrument;
+            vm->delayedVolume[channelIndex] = hasVolume ? volume : 0xFF;
+        } else {
+            if (instrument) {
+                if (!load_instrument(vm, instrument, &channel->definition)) {
+                    trackerLastError = 0x88;
+                    return 0;
+                }
+                channel->instrument = instrument;
+                channel->volumePosition = channel->volumeTick = channel->pitchPosition = 0;
+                channel->fadeout = 0x8000;
+            }
+            if (hasVolume) channel->volume = volume;
+            if (note == 97) {
+                if (noteDelay) {
+                    vm->noteDelayMask |= bit;
+                    vm->noteDelayRemain[channelIndex] = noteDelay;
+                    vm->delayedNote[channelIndex] = 97;
+                    vm->delayedInstrument[channelIndex] = 0;
+                    vm->delayedVolume[channelIndex] = 0xFF;
+                } else {
+                    channel->keyOn = 0;
+                    if (!(channel->definition.volumeFlags & TRACKER_ENV_ENABLED)) channel->gate = 0;
+                }
+            } else if (note) {
+                pitch = (uint16_t)(note + 11) << 8;
+                if (porta) channel->target = pitch;
+                else {
+                    start_note(channel, pitch, (uint8_t)(!hasVolume && instrument));
+                    vm->pendingReset |= bit;
+                }
+            }
+        }
+
+        if (effect == 0x0E) {
+            sub = (uint8_t)(parameter >> 4);
+            arg = (uint8_t)(parameter & 15);
+            if (sub == 1) {
+                if (arg) channel->slideUp = arg;
+                pitch = pitch_step(vm, channelIndex, channel->slideUp);
+                if (pitch) note_add(channel, pitch);
+            } else if (sub == 2) {
+                if (arg) channel->slideDown = arg;
+                pitch = pitch_step(vm, channelIndex, channel->slideDown);
+                if (pitch) note_sub(channel, pitch);
+            } else if (sub == 0x0A) {
+                if (arg) channel->volumeSlide = (uint8_t)((arg << 4)
+                    | (channel->volumeSlide & 15));
+                volume_slide(channel, (uint8_t)(channel->volumeSlide & 0xF0));
+            } else if (sub == 0x0B) {
+                if (arg) channel->volumeSlide = (uint8_t)((channel->volumeSlide & 0xF0) | arg);
+                volume_slide(channel, (uint8_t)(channel->volumeSlide & 15));
+            } else if (parameter == 0xC0) {
+                channel->keyOn = 0;
+                channel->gate = 0;
+            }
         }
     }
     return 1;
 }
 
-static void retrigger_channel(MEM_XDATA(TrackerVm) *vm, uint8_t index)
-{
-    vm->channel[index].volumePosition = 0;
-    vm->channel[index].volumeTick = 0;
-    vm->channel[index].pitchPosition = 0;
-    vm->channel[index].fadeout = 0x8000;
-    vm->channel[index].keyOn = 1;
-    vm->pendingReset |= (uint16_t)1 << index;
-}
-
 static void apply_tick_effects(MEM_XDATA(TrackerVm) *vm)
 {
     static MEM_XDATA(uint8_t) i;
-    static MEM_XDATA(uint8_t) up;
-    static MEM_XDATA(uint8_t) down;
     static MEM_XDATA(uint8_t) interval;
     static MEM_XDATA(uint16_t) step;
-    static MEM_XDATA(uint8_t) noteIndex;
     static TrackerChannelState __xdata * __xdata channel;
     if (!vm->tick) return;
     for (i = 0; i < WT_VOICE_COUNT; i++) {
         channel = &vm->channel[i];
-        if (channel->effect >= 1 && channel->effect <= 3) {
-            step = (uint16_t)channel->parameter << 4;
-            if (vm->amigaEffects) {
-                noteIndex = (uint8_t)(channel->note >> 8);
-                if (noteIndex > 128) noteIndex = 128;
-                step = (uint16_t)channel->parameter * amigaSlideScale[noteIndex];
-            }
-        }
         switch (channel->effect) {
         case 1:
-            channel->note = channel->note > 0xFFFFU - step ? 0xFFFFU : channel->note + step;
+            step = pitch_step(vm, i, channel->parameter);
+            if (step) note_add(channel, step);
             break;
         case 2:
-            channel->note = channel->note > step ? channel->note - step : 1;
+            step = pitch_step(vm, i, channel->parameter);
+            if (step) note_sub(channel, step);
             break;
         case 3:
-            if (channel->note < channel->target)
-                channel->note = channel->target - channel->note < step ? channel->target : channel->note + step;
-            else if (channel->note > channel->target)
-                channel->note = channel->note - channel->target < step ? channel->target : channel->note - step;
+            step = pitch_step(vm, i, channel->portaSpeed);
+            if (step) tone_porta(channel, step);
+            break;
+        case 5:
+            step = pitch_step(vm, i, channel->portaSpeed);
+            if (step) tone_porta(channel, step);
+            volume_slide(channel, channel->parameter);
             break;
         case 4:
+        case 7:
             channel->vibratoPhase = (uint8_t)((channel->vibratoPhase + channel->vibratoSpeed) & 63);
             break;
+        case 6:
+            channel->vibratoPhase = (uint8_t)((channel->vibratoPhase + channel->vibratoSpeed) & 63);
+            volume_slide(channel, channel->parameter);
+            break;
         case 0x0A:
-            up = channel->parameter >> 4;
-            down = channel->parameter & 15;
-            if (up) channel->volume = channel->volume + up > 64 ? 64 : channel->volume + up;
-            else channel->volume = channel->volume > down ? channel->volume - down : 0;
+            volume_slide(channel, channel->parameter);
             break;
         case 0x0E:
             interval = channel->parameter & 15;
-            if ((channel->parameter >> 4) == 9 && interval && vm->tick % interval == 0)
-                retrigger_channel(vm, i);
-            else if ((channel->parameter >> 4) == 0x0C && vm->tick == interval) {
+            if ((channel->parameter >> 4) == 9 && interval && vm->tick % interval == 0) {
+                channel->volumePosition = 0;
+                channel->volumeTick = 0;
+                channel->pitchPosition = 0;
+                channel->fadeout = 0x8000;
+                channel->keyOn = 1;
+                channel->gate = 1;
+                vm->pendingReset |= (uint16_t)1 << i;
+            } else if ((channel->parameter >> 4) == 0x0C && vm->tick == interval) {
                 channel->keyOn = 0;
                 channel->gate = 0;
             }
@@ -377,10 +513,9 @@ static uint16_t output_pitch(MEM_XDATA(TrackerVm) *vm, uint8_t index)
     if (position >= channel->definition.pitchLength) position = channel->definition.pitchLength - 1;
     pitch += (int16_t)channel->definition.pitchMacro[position] << 6;
     if (channel->effect == 0 && channel->parameter) {
-        uint8_t shift = vm->tick % 3 == 1 ? channel->parameter >> 4
-                      : vm->tick % 3 == 2 ? channel->parameter & 15 : 0;
-        pitch += (uint16_t)shift << 8;
-    } else if (channel->effect == 4 && channel->gate) {
+        if (vm->tick % 3 == 1) pitch += (uint16_t)(channel->parameter >> 4) << 8;
+        else if (vm->tick % 3 == 2) pitch += (uint16_t)(channel->parameter & 15) << 8;
+    } else if ((channel->effect == 4 || channel->effect == 6) && channel->gate) {
         if (vm->amigaEffects) {
             noteIndex = (uint8_t)(channel->note >> 8);
             if (noteIndex > 128) noteIndex = 128;
@@ -434,6 +569,19 @@ static uint8_t advance_song(MEM_XDATA(TrackerVm) *vm)
     vm->tick++;
     if (vm->tick < vm->speed) return 1;
     vm->tick = 0;
+    if (vm->patternDelay) {
+        vm->patternDelay--;
+        vm->holdRow = 1;
+        return 1;
+    }
+    if (vm->loopJump) {
+        vm->loopJump = 0;
+        vm->flowPending = 0;
+        vm->holdRow = 0;
+        if (!load_order(vm)) return 0;
+        if (vm->loopStart >= vm->patternRows) { trackerLastError = 0x94; return 0; }
+        return seek_pattern_row(vm, vm->loopStart);
+    }
     if (vm->flowPending) {
         if (vm->nextOrder >= vm->orderCount) {
             if (!vm->loop) {
@@ -444,6 +592,7 @@ static uint8_t advance_song(MEM_XDATA(TrackerVm) *vm)
             vm->nextOrder = vm->restartOrder;
         }
         vm->order = vm->nextOrder;
+        reset_pattern_loop(vm);
         if (!load_order(vm)) return 0;
         if (vm->nextRow >= vm->patternRows) { trackerLastError = 0x94; return 0; }
         vm->flowPending = 0;
@@ -451,6 +600,7 @@ static uint8_t advance_song(MEM_XDATA(TrackerVm) *vm)
     }
     vm->row++;
     if (vm->row < vm->patternRows) return 1;
+    reset_pattern_loop(vm);
     vm->order++;
     if (vm->order >= vm->orderCount) {
         if (!vm->loop) {
@@ -472,6 +622,7 @@ static uint8_t vm_next_event(MEM_XDATA(TrackerVm) *vm, MEM_XDATA(TrackerControlE
     static MEM_XDATA(uint32_t) pcmEntry;
     static MEM_XDATA(uint32_t) pcmAddress;
     static MEM_XDATA(uint16_t) pcmLength;
+    static MEM_XDATA(uint16_t) pcmSkip;
     static TrackerChannelState __xdata * __xdata channel;
     static MEM_XDATA(TrackerVoiceControl) control;
     memset(event, 0, sizeof(*event));
@@ -480,7 +631,15 @@ static uint8_t vm_next_event(MEM_XDATA(TrackerVm) *vm, MEM_XDATA(TrackerControlE
         event->waitSamples = 1;
         return 1;
     }
-    if (!vm->tick && !decode_row(vm)) return 0;
+    if (!vm->tick) {
+        if (vm->holdRow) {
+            vm->holdRow = 0;
+        } else if (!decode_row(vm)) {
+            return 0;
+        }
+    }
+    service_note_delays(vm);
+    if (trackerLastError) return 0;
     apply_tick_effects(vm);
     bit = 1;
     for (i = 0; i < WT_VOICE_COUNT; i++, bit <<= 1) {
@@ -503,26 +662,47 @@ static uint8_t vm_next_event(MEM_XDATA(TrackerVm) *vm, MEM_XDATA(TrackerControlE
                                   * (channel->fadeout >> 7)) >> 8);
         } else control.volume = 0;
         if (control.volume > 127) control.volume = 127;
+        if (channel->effect == 7 && channel->gate && control.volume) {
+            int16_t trem = ((int16_t)vibratoSine[channel->vibratoPhase >> 2]
+                            * channel->vibratoDepth) >> 4;
+            if (trem >= 0)
+                control.volume = control.volume + (uint8_t)trem > 127
+                    ? 127 : (uint8_t)(control.volume + trem);
+            else {
+                trem = -trem;
+                control.volume = control.volume > (uint8_t)trem
+                    ? (uint8_t)(control.volume - trem) : 0;
+            }
+        }
         if (channel->definition.mode >= WT_MODE_PCM_BASE
          && channel->definition.mode < WT_MODE_NOISE_LONG) {
             control.volume = (control.volume + 2U) >> 2;
             if (control.volume > 31) control.volume = 31;
             if ((vm->pendingReset & bit) && control.volume) {
                 pcmEntry = vm->pcmDirectoryOffset
-                         + (uint32_t)(channel->definition.mode - WT_MODE_PCM_BASE)
-                         * T10_PCM_ENTRY_SIZE;
-                pcmAddress = vm->trackStream.base + stream_u32(&vm->trackStream, pcmEntry);
-                pcmLength = stream_u16(&vm->trackStream, pcmEntry + 4);
+                         + ((uint32_t)(channel->definition.mode - WT_MODE_PCM_BASE) << 3);
+                pcmAddress = (uint32_t)vm->trackBase + track_u32(vm, (uint16_t)(pcmEntry));
+                pcmLength = track_u16(vm, (uint16_t)(pcmEntry + 4));
                 if (pcmAddress > 0xFFFFUL || !pcmLength) {
                     trackerLastError = 0x89;
                     return 0;
                 }
-                control.increment[0] = (uint8_t)pcmAddress;
-                control.increment[1] = (uint8_t)(pcmAddress >> 8);
-                control.increment[2] = (uint8_t)pcmLength;
-                control.waveOffset = (uint8_t)(pcmLength >> 8);
-                /* Bit 7 selects PCM; bit 6 asks the ISR to prime its sample cache. */
-                control.volume |= 0xC0;
+                pcmSkip = (vm->useSampleOffsetMask & bit) ? ((uint16_t)vm->sampleOffset[i] << 8) : 0;
+                if (pcmSkip >= pcmLength) {
+                    control.volume = 0;
+                } else {
+                    pcmAddress += pcmSkip;
+                    pcmLength = (uint16_t)(pcmLength - pcmSkip);
+                    if (pcmAddress > 0xFFFFUL) {
+                        trackerLastError = 0x89;
+                        return 0;
+                    }
+                    control.increment[0] = (uint8_t)pcmAddress;
+                    control.increment[1] = (uint8_t)(pcmAddress >> 8);
+                    control.increment[2] = (uint8_t)pcmLength;
+                    control.waveOffset = (uint8_t)(pcmLength >> 8);
+                    control.volume |= 0xC0;
+                }
             } else control = vm->output[i];
         } else if (channel->definition.mode == WT_MODE_NOISE_LONG
                 || channel->definition.mode == WT_MODE_NOISE_SHORT) {
@@ -553,82 +733,55 @@ static uint8_t vm_next_event(MEM_XDATA(TrackerVm) *vm, MEM_XDATA(TrackerControlE
 static uint8_t open_track(MEM_XDATA(TrackerPlayer) *player, uint16_t index)
 {
     MEM_XDATA(TrackerVm) *vm = &player->vm;
-    uint32_t entry = T10P_HEADER_SIZE + (uint32_t)index * T10P_ENTRY_SIZE;
-    uint32_t offset = stream_u32(&player->scheduler.playlistStream, entry);
-    uint32_t size = stream_u32(&player->scheduler.playlistStream, entry + 4);
-    uint32_t totalSize;
-    uint32_t waveAddress;
+    uint16_t entry = (uint16_t)(T10P_HEADER_SIZE + ((uint32_t)index << 3));
+    uint16_t scoreBase = (uint16_t)(uint16_t)Score;
+    uint32_t offset = score_u32((uint16_t)(scoreBase + entry));
+    uint32_t size = score_u32((uint16_t)(scoreBase + entry + 4));
+    uint16_t waveAddress;
+    uint8_t flags;
     uint8_t i;
     PlatformIrqState irq;
     trackerLastError = 0x20;
-    if (offset < T10P_HEADER_SIZE + (uint32_t)player->scheduler.trackCount * T10P_ENTRY_SIZE
-     || offset > player->scheduler.playlistSize || size > player->scheduler.playlistSize - offset
-     || size < T10M_HEADER_SIZE) return 0;
+    if (offset < T10P_HEADER_SIZE + ((uint32_t)player->scheduler.trackCount << 3)
+     || offset > player->scheduler.playlistSize
+     || size > player->scheduler.playlistSize - offset
+     || size < T10M_HEADER_SIZE || offset + size > 0x10000UL) return 0;
     memset(vm, 0, sizeof(*vm));
-    stream_sub(&vm->trackStream, &player->scheduler.playlistStream, offset, size);
-    vm->trackSize = size;
-    if (stream_u8(&vm->trackStream, 0) != 'T' || stream_u8(&vm->trackStream, 1) != '1'
-     || stream_u8(&vm->trackStream, 2) != '0' || stream_u8(&vm->trackStream, 3) != 'M'
-     || stream_u8(&vm->trackStream, 4) != 4 || stream_u8(&vm->trackStream, 5) != WT_VOICE_COUNT
-     || stream_u32(&vm->trackStream, 8) != T10_SAMPLE_RATE) return 0;
-    vm->loop = stream_u8(&vm->trackStream, 6) & T10_TRACK_LOOP;
-    vm->amigaEffects = !!(stream_u8(&vm->trackStream, 6) & T10_TRACK_AMIGA_EFFECTS);
-    vm->orderCount = stream_u16(&vm->trackStream, 16);
-    vm->restartOrder = stream_u16(&vm->trackStream, 18);
-    vm->patternDirectoryOffset = stream_u32(&vm->trackStream, 20);
+    vm->trackBase = (uint16_t)(scoreBase + offset);
+    vm->trackSize = (uint16_t)size;
+    /* Host-validated T10M: only essential fields, no magic/rate re-check tree. */
+    if (track_u8(vm, 4) != 4 || track_u8(vm, 5) != WT_VOICE_COUNT) return 0;
+    flags = track_u8(vm, 6);
+    if (flags & 0xFC) return 0;
+    vm->loop = flags & T10_TRACK_LOOP;
+    vm->amigaEffects = !!(flags & T10_TRACK_AMIGA_EFFECTS);
+    vm->orderCount = track_u16(vm, 16);
+    vm->restartOrder = track_u16(vm, 18);
+    vm->patternDirectoryOffset = (uint16_t)track_u32(vm, 20);
     {
-        uint16_t patternCount = stream_u16(&vm->trackStream, 24);
-        uint16_t initialSpeed = stream_u16(&vm->trackStream, 40);
-        if (!patternCount || patternCount > 255 || !initialSpeed || initialSpeed > 255) return 0;
+        uint16_t patternCount = track_u16(vm, 24);
+        uint16_t initialSpeed = track_u16(vm, 40);
+        if (!patternCount || patternCount > 255 || !initialSpeed || initialSpeed > 255
+         || !vm->orderCount || vm->orderCount > 256
+         || vm->restartOrder >= vm->orderCount) return 0;
         vm->patternCount = (uint8_t)patternCount;
         vm->speed = (uint8_t)initialSpeed;
     }
-    vm->instrumentCount = stream_u16(&vm->trackStream, 26);
-    vm->instrumentOffset = stream_u32(&vm->trackStream, 28);
-    vm->resourceOffset = stream_u32(&vm->trackStream, 44);
-    totalSize = stream_u32(&vm->trackStream, 32);
-    vm->bpm = stream_u16(&vm->trackStream, 42);
-    {
-        uint32_t orderOffset = stream_u32(&vm->trackStream, 12);
-        uint32_t patternBytes = (uint32_t)vm->patternCount * T10_PATTERN_ENTRY_SIZE;
-        uint32_t instrumentBytes = (uint32_t)vm->instrumentCount * T10_INSTRUMENT_SIZE;
-        if (totalSize != size || !vm->orderCount || vm->orderCount > 256
-         || vm->restartOrder >= vm->orderCount || !vm->instrumentCount
-         || vm->instrumentCount > 255 || vm->bpm < 32 || vm->bpm > 999
-         || (stream_u8(&vm->trackStream, 6) & 0xFC) || stream_u8(&vm->trackStream, 7)
-         || orderOffset > size || vm->orderCount > size - orderOffset
-         || vm->patternDirectoryOffset > size || patternBytes > size - vm->patternDirectoryOffset
-         || vm->instrumentOffset > size || instrumentBytes > size - vm->instrumentOffset
-         || vm->resourceOffset < vm->instrumentOffset + instrumentBytes
-         || vm->resourceOffset > size
-         || T10_RESOURCE_HEADER_SIZE > size - vm->resourceOffset) return 0;
-    }
-    if (storage_get_backend() != STORAGE_BACKEND_INTERNAL
-     || stream_u8(&vm->trackStream, vm->resourceOffset) != 'T'
-     || stream_u8(&vm->trackStream, vm->resourceOffset + 1) != '1'
-     || stream_u8(&vm->trackStream, vm->resourceOffset + 2) != '0'
-     || stream_u8(&vm->trackStream, vm->resourceOffset + 3) != 'R') return 0;
-    vm->waveCount = stream_u8(&vm->trackStream, vm->resourceOffset + 4);
-    vm->pcmCount = stream_u8(&vm->trackStream, vm->resourceOffset + 5);
-    vm->pcmDirectoryOffset = vm->resourceOffset + T10_RESOURCE_HEADER_SIZE
-                           + (uint32_t)vm->waveCount * T10_WAVE_SIZE;
+    vm->instrumentCount = track_u16(vm, 26);
+    vm->instrumentOffset = (uint16_t)track_u32(vm, 28);
+    vm->resourceOffset = (uint16_t)track_u32(vm, 44);
+    vm->bpm = track_u16(vm, 42);
+    if (!vm->instrumentCount || vm->instrumentCount > 255
+     || vm->bpm < 32 || vm->bpm > 999
+     || (uint32_t)vm->resourceOffset + T10_RESOURCE_HEADER_SIZE > size) return 0;
+    vm->waveCount = track_u8(vm, (uint16_t)(vm->resourceOffset + 4));
+    vm->pcmCount = track_u8(vm, (uint16_t)(vm->resourceOffset + 5));
+    vm->pcmDirectoryOffset = (uint16_t)(vm->resourceOffset + T10_RESOURCE_HEADER_SIZE
+                           + ((uint16_t)vm->waveCount << 4));
     if (!vm->waveCount || vm->waveCount > WT_WAVE_COUNT
-     || vm->pcmCount > WT_MODE_NOISE_LONG - WT_MODE_PCM_BASE
-     || stream_u16(&vm->trackStream, vm->resourceOffset + 6) != T10_PCM_RATE
-     || vm->pcmDirectoryOffset > size
-     || (uint32_t)vm->pcmCount * T10_PCM_ENTRY_SIZE > size - vm->pcmDirectoryOffset) return 0;
-    waveAddress = vm->trackStream.base + vm->resourceOffset + T10_RESOURCE_HEADER_SIZE;
-    if (waveAddress > 0xFFFFUL
-     || (uint32_t)vm->waveCount * T10_WAVE_SIZE > 0x10000UL - waveAddress) return 0;
-    for (i = 0; i < vm->pcmCount; i++) {
-        uint32_t entry = vm->pcmDirectoryOffset + (uint32_t)i * T10_PCM_ENTRY_SIZE;
-        uint32_t pcmOffset = stream_u32(&vm->trackStream, entry);
-        uint16_t pcmLength = stream_u16(&vm->trackStream, entry + 4);
-        uint32_t pcmAddress = vm->trackStream.base + pcmOffset;
-        if (!pcmLength || stream_u16(&vm->trackStream, entry + 6)
-         || pcmOffset > size || pcmLength > size - pcmOffset
-         || pcmAddress > 0xFFFFUL || pcmLength > 0x10000UL - pcmAddress) return 0;
-    }
+     || vm->pcmCount > WT_MODE_NOISE_LONG - WT_MODE_PCM_BASE) return 0;
+    waveAddress = (uint16_t)(vm->trackBase + vm->resourceOffset + T10_RESOURCE_HEADER_SIZE);
+    if (((uint32_t)vm->waveCount << 4) > 0x10000UL - waveAddress) return 0;
     for (i = 0; i < WT_VOICE_COUNT; i++) {
         vm->channel[i].volume = 64;
         default_instrument(&vm->channel[i].definition);
@@ -640,7 +793,7 @@ static uint8_t open_track(MEM_XDATA(TrackerPlayer) *player, uint16_t index)
     WavetableSynthSilence();
     AudioBufferInit();
     Platform_IrqSave(irq);
-    wavetableCodeBase = (uint16_t)waveAddress;
+    wavetableCodeBase = waveAddress;
     Platform_IrqRestore(irq);
     trackerLastError = 0;
     return 1;
@@ -656,23 +809,21 @@ void TrackerPlayerInit(MEM_XDATA(TrackerPlayer) *player)
 
 uint8_t TrackerPlayerStart(MEM_XDATA(TrackerPlayer) *player, uint8_t mode)
 {
-    uint32_t size = storage_get_backend() == STORAGE_BACKEND_SPI ? SPI_FLASH_SIZE : ScoreSize;
-    storage_init();
-    stream_init(&player->scheduler.playlistStream, storage_get_base_addr(), size);
-    if (size < T10P_HEADER_SIZE || stream_u8(&player->scheduler.playlistStream, 0) != 'T'
-     || stream_u8(&player->scheduler.playlistStream, 1) != '1'
-     || stream_u8(&player->scheduler.playlistStream, 2) != '0'
-     || stream_u8(&player->scheduler.playlistStream, 3) != 'P'
-     || stream_u8(&player->scheduler.playlistStream, 4) != 4
-     || stream_u8(&player->scheduler.playlistStream, 5)
-     || stream_u32(&player->scheduler.playlistStream, 12)) {
+    uint16_t scoreBase = (uint16_t)(uint16_t)Score;
+    uint32_t size = ScoreSize;
+    if (size < T10P_HEADER_SIZE || size > 0x10000UL
+     || score_u32(scoreBase) != 0x50303154UL
+     || score_u8((uint16_t)(scoreBase + 4)) != 4
+     || score_u8((uint16_t)(scoreBase + 5))
+     || score_u32((uint16_t)(scoreBase + 12))) {
         trackerLastError = 0x10;
         player->vm.status = TRACKER_ERROR;
         return 0;
     }
-    player->scheduler.trackCount = stream_u16(&player->scheduler.playlistStream, 6);
-    player->scheduler.playlistSize = stream_u32(&player->scheduler.playlistStream, 8);
-    if (!player->scheduler.trackCount || player->scheduler.playlistSize > size
+    player->scheduler.trackCount = score_u16((uint16_t)(scoreBase + 6));
+    player->scheduler.playlistSize = (uint16_t)score_u32((uint16_t)(scoreBase + 8));
+    if (!player->scheduler.trackCount
+     || player->scheduler.playlistSize > size
      || player->scheduler.playlistSize < T10P_HEADER_SIZE
         + (uint32_t)player->scheduler.trackCount * T10P_ENTRY_SIZE) {
         trackerLastError = 0x11;

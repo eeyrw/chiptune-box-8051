@@ -5,7 +5,7 @@ import pytest
 
 from tools.tracker10.format import (ENV_ENABLED, ENV_SUSTAIN, MODE_PCM_BASE, PCM_RATE,
                                     Cell, Instrument, PcmSample, Song, decode_track, encode_track,
-                                    inspect_playlist, inspect_track, pack_playlist)
+                                    inspect_playlist, inspect_track, optimize_song, pack_playlist)
 from tools.tracker10.reference import ReferencePlayer
 from tools.tracker10.xm import (XmError, XmSample, _instrument_note_counts, _normalize_cell,
                                _wave_table, analyze_xm, _pcm_sample, compile_xm, parse_xm)
@@ -61,6 +61,67 @@ def test_order_reuse_does_not_duplicate_pattern_data():
     assert len(many) - len(one) == len(song.orders) * 19
 
 
+def test_optimize_song_prunes_instruments_and_trailing_rows():
+    empty = (Cell(),) * 10
+    used = list(empty)
+    used[0] = Cell(note=49, instrument=2, volume=65)
+    # 4 rows: one event then trailing empties; Dxx not present so trim to 1
+    pattern = (tuple(used), empty, empty, empty)
+    instruments = (
+        Instrument(mode=0, gain=0),
+        Instrument(mode=1, gain=20),
+        Instrument(mode=0, gain=0),
+    )
+    waves = ((1,) * 16, (2,) * 16)
+    song = Song((0,), 0, 6, 125, (pattern,), instruments, waves=waves)
+    optimized = optimize_song(song)
+    assert len(optimized.instruments) == 1
+    assert optimized.instruments[0].mode == 0  # remapped wave 1 -> 0
+    assert len(optimized.waves) == 1
+    assert optimized.waves[0] == (2,) * 16
+    assert len(optimized.patterns[0]) == 1
+    assert optimized.patterns[0][0][0].instrument == 1
+    assert len(encode_track(optimized)) < len(encode_track(song))
+
+
+def test_optimize_song_keeps_destination_rows_for_dxx():
+    empty = (Cell(),) * 10
+    # Pattern 0: break to row 5 of next order (pattern 1).
+    break_row = list(empty)
+    break_row[0] = Cell(effect=0x0D, parameter=0x05)
+    # Pattern 1: content only on row 5; trailing empties after that.
+    target = [empty] * 8
+    hit = list(empty)
+    hit[0] = Cell(note=49, instrument=1, volume=65)
+    target[5] = tuple(hit)
+    song = Song((0, 1), 0, 6, 125,
+                ((tuple(break_row), empty), tuple(target)),
+                (Instrument(mode=0, gain=20),),
+                waves=((1,) * 16,))
+    optimized = optimize_song(song)
+    assert len(optimized.patterns[1]) >= 6
+    assert optimized.patterns[1][5][0].note == 49
+
+
+def test_optimize_song_rejects_dxx_past_destination_length():
+    empty = (Cell(),) * 10
+    break_row = list(empty)
+    break_row[0] = Cell(effect=0x0D, parameter=0x20)  # row 20
+    short = (tuple(break_row),) + (empty,) * 7  # 8 rows only
+    song = Song((0, 0), 0, 6, 125, (short,),
+                (Instrument(mode=0, gain=20),), waves=((1,) * 16,))
+    with pytest.raises(ValueError, match="pattern break targets row"):
+        optimize_song(song)
+
+
+def test_scale_sample_offset_preserves_relative_position():
+    from tools.tracker10.effects import scale_sample_offset
+    # 1024 source frames -> 512 PCM frames; 0x10 * 256 source units -> half.
+    assert scale_sample_offset(0x10, 1024, 512) == 0x08
+    assert scale_sample_offset(0, 1000, 500) == 0
+    assert scale_sample_offset(1, 100, 10) >= 1
+
+
 def test_crc_rejects_corruption():
     track = bytearray(encode_track(simple_song()))
     track[-1] ^= 0x40
@@ -96,7 +157,7 @@ def test_reference_emits_pcm_trigger_without_tonal_voice():
                 (Instrument(mode=MODE_PCM_BASE, gain=31),),
                 pcm_samples=(PcmSample(bytes((0, 1, 2))),))
     frame = ReferencePlayer(song).step()
-    assert frame.pcm_triggers == ((0, 31),)
+    assert frame.pcm_triggers == ((0, 31, 0),)
     assert frame.voices[0].volume == 0
 
 
@@ -106,7 +167,7 @@ def test_reference_preserves_same_sample_simultaneous_pcm_triggers():
     song = Song((0,), 0, 1, 125, ((tuple(row),),),
                 (Instrument(mode=MODE_PCM_BASE, gain=31),),
                 pcm_samples=(PcmSample(bytes((0, 1, 2))),))
-    assert ReferencePlayer(song).step().pcm_triggers == ((0, 31), (0, 31))
+    assert ReferencePlayer(song).step().pcm_triggers == ((0, 31, 0), (0, 31, 0))
 
 
 def test_quiet_tonal_voice_retains_fractional_mixer_gain():
@@ -335,9 +396,17 @@ def test_xm_cell_cannot_reference_missing_instrument():
 
 
 def test_unsupported_effect_fails_instead_of_sounding_wrong():
-    module = parse_xm(minimal_xm(5, 1))
-    with pytest.raises(XmError, match="unsupported effect"):
-        compile_xm(module)
+    module = parse_xm(minimal_xm(0x0B, 0x7F))  # invalid jump still fails later; use unknown E
+    # effect 0x0E with unsupported sub still fails
+    with pytest.raises(XmError, match="unsupported extended effect"):
+        _normalize_cell(Cell(effect=0x0E, parameter=0x31), 0, 0, 0)
+
+
+def test_xm_five_six_seven_compile():
+    for effect, param in ((5, 0x34), (6, 0x12), (7, 0x45)):
+        decoded = decode_track(compile_xm(parse_xm(minimal_xm(effect, param)))[0])
+        assert decoded.patterns[0][0][0].effect == effect
+        assert decoded.patterns[0][0][0].parameter == param
 
 
 def test_xm_set_volume_effect_lowers_to_absolute_volume():
@@ -349,25 +418,32 @@ def test_xm_set_volume_effect_lowers_to_absolute_volume():
         _normalize_cell(Cell(volume=0x20, effect=0x0C, parameter=32), 1, 2, 3)
 
 
-def test_empty_extended_effect_is_a_noop_but_nonzero_e0x_is_rejected():
+def test_empty_extended_effect_is_a_noop_but_unknown_e3x_is_rejected():
     assert _normalize_cell(Cell(effect=0x0E, parameter=0), 1, 2, 3) == Cell()
-    with pytest.raises(XmError, match="unsupported extended effect E01"):
-        _normalize_cell(Cell(effect=0x0E, parameter=1), 1, 2, 3)
+    assert _normalize_cell(Cell(effect=0x0E, parameter=0x12), 1, 2, 3) == Cell(
+        effect=0x0E, parameter=0x12)
+    with pytest.raises(XmError, match="unsupported extended effect E31"):
+        _normalize_cell(Cell(effect=0x0E, parameter=0x31), 1, 2, 3)
 
 
 def test_volume_column_slides_reuse_main_volume_slide_effect():
     assert _normalize_cell(Cell(volume=0x63), 1, 2, 3) == Cell(effect=0x0A, parameter=3)
     assert _normalize_cell(Cell(volume=0x74), 1, 2, 3) == Cell(effect=0x0A, parameter=0x40)
-    assert _normalize_cell(Cell(volume=0x8F), 1, 2, 3) == Cell()
+    assert _normalize_cell(Cell(volume=0x8F), 1, 2, 3) == Cell(
+        effect=0x0E, parameter=0xAF)
+    assert _normalize_cell(Cell(volume=0x93), 1, 2, 3) == Cell(
+        effect=0x0E, parameter=0xB3)
     assert _normalize_cell(Cell(volume=0x63, effect=1, parameter=2), 1, 2, 3) == Cell(
         effect=1, parameter=2)
 
 
 def test_lossy_effect_lowering_is_explicit_and_note_cut_is_preserved():
     assert _normalize_cell(Cell(effect=6, parameter=0x03), 1, 2, 3) == Cell(
-        effect=0x0A, parameter=3)
-    assert _normalize_cell(Cell(effect=9, parameter=0x20), 1, 2, 3) == Cell()
-    assert _normalize_cell(Cell(note=49, effect=0x0E, parameter=0xD2), 1, 2, 3) == Cell(note=49)
+        effect=6, parameter=0x03)
+    assert _normalize_cell(Cell(effect=9, parameter=0x20), 1, 2, 3) == Cell(
+        effect=9, parameter=0x20)
+    assert _normalize_cell(Cell(note=49, effect=0x0E, parameter=0xD2), 1, 2, 3) == Cell(
+        note=49, effect=0x0E, parameter=0xD2)
     assert _normalize_cell(Cell(effect=0x0E, parameter=0xC2), 1, 2, 3) == Cell(
         effect=0x0E, parameter=0xC2)
 
@@ -486,3 +562,111 @@ def test_amiga_effect_scaling_is_note_dependent():
     player = ReferencePlayer(song)
     first, second = player.step(), player.step()
     assert first.voices[0].pitch - second.voices[0].pitch == 10
+
+
+def test_pattern_delay_holds_row_without_retrigger():
+    empty = (Cell(),) * 10
+    rows = []
+    # row 0: note + EE1 (one extra speed period)
+    row0 = list(empty)
+    row0[0] = Cell(note=49, instrument=1, volume=65, effect=0x0E, parameter=0xE1)
+    rows.append(tuple(row0))
+    # row 1: different note to detect early advance
+    row1 = list(empty)
+    row1[0] = Cell(note=61, instrument=1, volume=65)
+    rows.append(tuple(row1))
+    song = Song((0,), 0, 2, 125, (tuple(rows),),
+                (Instrument(mode=0, gain=31),))
+    player = ReferencePlayer(song)
+    frames = [player.step() for _ in range(6)]
+    # speed=2: real row uses ticks 0,1 then hold uses ticks 0,1 then row1
+    assert [f.row for f in frames] == [0, 0, 0, 0, 1, 1]
+    assert frames[0].voices[0].reset is True
+    assert frames[2].voices[0].reset is False  # hold period does not retrigger
+    assert frames[4].voices[0].reset is True
+
+
+def test_pattern_loop_repeats_from_start():
+    empty = (Cell(),) * 10
+    rows = []
+    row0 = list(empty)
+    row0[0] = Cell(note=49, instrument=1, volume=65, effect=0x0E, parameter=0x60)
+    rows.append(tuple(row0))
+    row1 = list(empty)
+    row1[0] = Cell(note=61, instrument=1, volume=65, effect=0x0E, parameter=0x61)
+    rows.append(tuple(row1))
+    row2 = list(empty)
+    row2[0] = Cell(note=73, instrument=1, volume=65)
+    rows.append(tuple(row2))
+    song = Song((0,), 0, 1, 125, (tuple(rows),),
+                (Instrument(mode=0, gain=31),))
+    player = ReferencePlayer(song)
+    # speed=1: one tick per row
+    # order of rows visited on successive ticks (frame.row is pre-advance):
+    # 0, 1 (loop back), 0, 1 (count done), 2
+    frames = [player.step() for _ in range(5)]
+    assert [f.row for f in frames] == [0, 1, 0, 1, 2]
+
+
+def test_xm_five_xx_is_kept_as_combined_effect():
+    assert _normalize_cell(Cell(note=49, effect=5, parameter=0x34), 0, 0, 0) == Cell(
+        note=49, effect=5, parameter=0x34)
+
+
+def test_fine_portamento_and_volume_on_tick_zero():
+    empty = (Cell(),) * 10
+    row = list(empty)
+    row[0] = Cell(note=49, instrument=1, volume=33, effect=0x0E, parameter=0xA4)
+    song = Song((0,), 0, 2, 125, ((tuple(row), empty),),
+                (Instrument(mode=0, gain=31),))
+    player = ReferencePlayer(song)
+    frame = player.step()
+    # volume 32 + fine up 4 = 36
+    assert player.channels[0].volume == 36
+    base = player.channels[0].note
+    row2 = list(empty)
+    row2[0] = Cell(effect=0x0E, parameter=0x14)  # fine porta up 4
+    song2 = Song((0,), 0, 2, 125, ((tuple(row), tuple(row2)),),
+                 (Instrument(mode=0, gain=31),))
+    player = ReferencePlayer(song2)
+    player.step()  # row0
+    player.step()  # row0 tick1
+    before = player.channels[0].note
+    player.step()  # row1 tick0 applies E14
+    assert player.channels[0].note == before + (4 << 4)
+
+
+def test_fine_porta_memory_reuses_previous_amount():
+    empty = (Cell(),) * 10
+    r0 = list(empty)
+    r0[0] = Cell(note=49, instrument=1, volume=65, effect=0x0E, parameter=0x12)
+    r1 = list(empty)
+    r1[0] = Cell(effect=0x0E, parameter=0x10)  # E10 reuse
+    song = Song((0,), 0, 1, 125, ((tuple(r0), tuple(r1)),),
+                (Instrument(mode=0, gain=31),))
+    player = ReferencePlayer(song)
+    player.step()
+    after_first = player.channels[0].note
+    player.step()
+    assert player.channels[0].note == after_first + (2 << 4)
+
+
+def test_note_delay_triggers_after_countdown():
+    empty = (Cell(),) * 10
+    row = list(empty)
+    row[0] = Cell(note=49, instrument=1, volume=65, effect=0x0E, parameter=0xD2)
+    song = Song((0,), 0, 4, 125, ((tuple(row),),), (Instrument(mode=0, gain=31),))
+    player = ReferencePlayer(song)
+    f0 = player.step()  # tick0: remain 2 -> 1, no note yet
+    assert f0.voices[0].reset is False
+    assert player.channels[0].gate is False
+    f1 = player.step()  # tick1: remain 1 -> 0
+    assert f1.voices[0].reset is False
+    f2 = player.step()  # tick2: fire
+    assert f2.voices[0].reset is True
+    assert player.channels[0].gate is True
+
+
+def test_sample_offset_kept_in_normalized_cell():
+    assert _normalize_cell(Cell(note=49, instrument=1, effect=9, parameter=6), 0, 0, 0) == Cell(
+        note=49, instrument=1, effect=9, parameter=6)

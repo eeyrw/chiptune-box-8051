@@ -37,8 +37,7 @@ XRAM_SIZE = --xram-loc 0x0000 --xram-size 3072
 # all the files will be generated with this name (main.elf, main.bin, main.hex, etc)
 PROJECT_NAME=music-box-8051
 
-# Storage backend: runtime-selectable via function pointer dispatcher
-# Both backends are always compiled; backend chosen by storage_auto_detect() at boot
+# Score storage is internal Code Flash only (scoreList.c / MOVC).
 
 # specify define
 DEFS       = STC8
@@ -62,11 +61,10 @@ SRC 	+= TrackerPlayer/TrackerPlayer.c
 SRC 	+= Bsp.c
 SRC 	+= Protocol.c
 
-SRC 	+= Storage.c
-SRC 	+= SpiFlash.c
 SRC 	+= $(SCORE_SOURCE)
 
 ASM_SRC =
+ASM_SRC   += ScoreFlash.s
 ASM_SRC   += WavetableSynth/WavetableSynthAsm.s
 ASM_SRC   += WavetableSynth/PeriodTimer.s
 ASM_SRC   += WavetableSynth/AudioRender.s
@@ -83,7 +81,8 @@ OTHER_OUTPUTS += $(ASM_SRC:.s=.lst) $(SRC:.c=.lst)
 OTHER_OUTPUTS += $(ASM_SRC:.s=.rst) $(SRC:.c=.rst)
 OTHER_OUTPUTS += $(ASM_SRC:.s=.sym) $(SRC:.c=.sym)
 CFLAGS  = -m$(ARCH) -p$(MCU) --model-$(MODEL) --std-sdcc11
-CFLAGS += -DF_CPU=$(F_CPU)UL -I. $(patsubst %, -I%, $(LIBDIR)) $(DDEFS) --stack-auto
+CFLAGS += -DF_CPU=$(F_CPU)UL -I. $(patsubst %, -I%, $(LIBDIR)) $(DDEFS) --stack-auto --opt-code-size
+CFLAGS += --max-allocs-per-node 100000
 ASFLAGS  = $(AS_INC) -plosgff -l -s
 LD_FLAGS = -m$(ARCH) -l$(ARCH) --out-fmt-ihx -m$(MCU_MODEL) --model-$(MODEL) $(CODE_SIZE) $(IRAM_SIZE) $(XRAM_SIZE) --stack-auto
 
@@ -95,7 +94,7 @@ all: $(OBJECTS) $(PROJECT_NAME).ihx $(PROJECT_NAME).hex $(PROJECT_NAME).bin
 # Don't delete dependency files
 .PRECIOUS: %.d
 
-.PHONY: FORCE host-test compile-tracker generate-builtin-score xm-hex flash-xm
+.PHONY: FORCE host-test compile-tracker generate-builtin-score xm-hex flash-xm tracker-hex flash-tracker
 
 TRACKER_INPUT ?=
 TRACKER_OUTPUT ?= output.t10p
@@ -127,6 +126,11 @@ xm-hex:
 
 flash-xm: xm-hex
 	@$(MAKE) flash SCORE_SOURCE="$(XM_SCORE_C)"
+
+# Format-neutral aliases; TRACKER_INPUT may be .xm or .mod.
+tracker-hex: xm-hex
+
+flash-tracker: flash-xm
 
 # Don't rebuild deps if cleaning
 ifneq ($(MAKECMDGOALS),clean)

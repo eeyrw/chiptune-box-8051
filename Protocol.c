@@ -3,8 +3,8 @@
 #include "TrackerPlayer.h"
 #include "WavetableSynth.h"
 #include "Bsp.h"
-#include "Storage.h"
-#include "SpiFlash.h"
+
+
 
 #define RX_BUF_SIZE 128
 #define RX_MASK 127
@@ -60,30 +60,6 @@ static uint32_t read_u32(const uint8_t *p)
     return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24);
 }
 
-static void flash_info(void)
-{
-    uint8_t data[9];
-    SpiFlash_ReadJedecId(data);
-    data[3]=(uint8_t)(SPI_FLASH_SIZE>>24); data[4]=(uint8_t)(SPI_FLASH_SIZE>>16);
-    data[5]=(uint8_t)(SPI_FLASH_SIZE>>8); data[6]=(uint8_t)SPI_FLASH_SIZE;
-    data[7]=(uint8_t)(SPI_FLASH_SECTOR_SIZE>>8); data[8]=(uint8_t)SPI_FLASH_SECTOR_SIZE;
-    respond(CMD_FLASH_INFO,STATUS_OK,data,9);
-}
-
-static void flash_read(void)
-{
-    uint8_t data[120];
-    uint8_t i, length;
-    uint32_t address;
-    if(pkt_len!=6) { error(CMD_FLASH_READ,STATUS_BAD_LEN); return; }
-    address=read_u32(pkt_data); length=pkt_data[4];
-    if(pkt_data[5] || length>sizeof(data) || address>SPI_FLASH_SIZE || length>SPI_FLASH_SIZE-address) {
-        error(CMD_FLASH_READ,STATUS_INVALID_ADDR); return;
-    }
-    for(i=0;i<length;i++) data[i]=SpiFlash_ReadByte(address+i);
-    respond(CMD_FLASH_READ,STATUS_OK,data,length);
-}
-
 static void dispatch(void)
 {
     uint8_t data[84];
@@ -99,7 +75,7 @@ static void dispatch(void)
         respond(pkt_cmd,STATUS_OK,data,i); break;
     }
     case CMD_GET_INFO:
-        data[0]=FW_VERSION_MAJOR; data[1]=FW_VERSION_MINOR; data[2]=storage_get_backend();
+        data[0]=FW_VERSION_MAJOR; data[1]=FW_VERSION_MINOR; data[2]=0; /* internal Flash */
         data[3]=(uint8_t)mainPlayer.scheduler.trackCount; respond(pkt_cmd,STATUS_OK,data,4); break;
     case CMD_RESET:
         ok(pkt_cmd); wait_tx_idle(); IAP_CONTR=0x60; while(1);
@@ -151,26 +127,12 @@ static void dispatch(void)
         else { WavetableSynthSetMuteMask((uint16_t)pkt_data[0]|((uint16_t)pkt_data[1]<<8)); ok(pkt_cmd); } break;
     case CMD_SYS_INFO:
     case CMD_FLASH_INFO:
-        if(storage_get_backend()!=STORAGE_BACKEND_SPI) error(pkt_cmd,STATUS_NOT_SUPPORTED); else flash_info(); break;
     case CMD_FLASH_READ_ID:
-        if(storage_get_backend()!=STORAGE_BACKEND_SPI) error(pkt_cmd,STATUS_NOT_SUPPORTED);
-        else { SpiFlash_ReadJedecId(data); respond(pkt_cmd,STATUS_OK,data,3); } break;
     case CMD_FLASH_READ:
-        if(storage_get_backend()!=STORAGE_BACKEND_SPI) error(pkt_cmd,STATUS_NOT_SUPPORTED); else flash_read(); break;
     case CMD_FLASH_ERASE:
-        if(storage_get_backend()!=STORAGE_BACKEND_SPI) error(pkt_cmd,STATUS_NOT_SUPPORTED);
-        else if(pkt_len!=4) error(pkt_cmd,STATUS_BAD_LEN);
-        else if(mainPlayer.vm.status==TRACKER_PLAYING) error(pkt_cmd,STATUS_NOT_SUPPORTED);
-        else respond(pkt_cmd,SpiFlash_SectorErase(read_u32(pkt_data))?STATUS_FLASH_ERR:STATUS_OK,0,0); break;
     case CMD_FLASH_ERASE_ALL:
-        if(storage_get_backend()!=STORAGE_BACKEND_SPI) error(pkt_cmd,STATUS_NOT_SUPPORTED);
-        else if(mainPlayer.vm.status==TRACKER_PLAYING) error(pkt_cmd,STATUS_NOT_SUPPORTED);
-        else respond(pkt_cmd,SpiFlash_ChipErase()?STATUS_FLASH_ERR:STATUS_OK,0,0); break;
     case CMD_FLASH_WRITE:
-        if(storage_get_backend()!=STORAGE_BACKEND_SPI) error(pkt_cmd,STATUS_NOT_SUPPORTED);
-        else if(pkt_len<5) error(pkt_cmd,STATUS_BAD_LEN);
-        else if(mainPlayer.vm.status==TRACKER_PLAYING) error(pkt_cmd,STATUS_NOT_SUPPORTED);
-        else respond(pkt_cmd,SpiFlash_PageProgram(read_u32(pkt_data),pkt_data+4,pkt_len-4)?STATUS_FLASH_ERR:STATUS_OK,0,0); break;
+        error(pkt_cmd,STATUS_NOT_SUPPORTED); break;
     default: error(pkt_cmd,STATUS_UNKNOWN_CMD); break;
     }
 }

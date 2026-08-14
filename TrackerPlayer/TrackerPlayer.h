@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 #include "Platform.h"
-#include "Storage.h"
+#include "ScoreFlash.h"
 #include "WavetableSynth.h"
 
 #define TRACKER_QUEUE_LENGTH 4
@@ -41,6 +41,7 @@ typedef struct _TrackerControlQueue {
     volatile uint8_t underruns;
 } TrackerControlQueue;
 
+/* Matches on-disk T10 instrument (48 bytes) so load is a bulk MOVC copy. */
 typedef struct _TrackerInstrumentState {
     uint8_t mode;
     uint8_t gain;
@@ -53,7 +54,8 @@ typedef struct _TrackerInstrumentState {
     uint8_t volumeLoopEnd;
     uint8_t pitchLength;
     uint8_t pitchLoop;
-    uint16_t fadeout; /* FT2 domain: 0..32768. */
+    uint16_t fadeout;
+    uint16_t reserved;
     uint8_t volumeMacro[TRACKER_MACRO_LENGTH];
     int8_t pitchMacro[TRACKER_MACRO_LENGTH];
 } TrackerInstrumentState;
@@ -82,15 +84,17 @@ typedef struct _TrackerChannelState {
 } TrackerChannelState;
 
 typedef struct _TrackerVm {
-    ScoreStream trackStream;
-    ScoreStream patternStream;
+    /* Absolute Code-Flash addresses into Score[]. */
+    uint16_t trackBase;
+    uint16_t patternPos;
+    uint16_t patternEnd;
     TrackerChannelState channel[WT_VOICE_COUNT];
     TrackerVoiceControl output[WT_VOICE_COUNT];
-    uint32_t trackSize;
-    uint32_t patternDirectoryOffset;
-    uint32_t instrumentOffset;
-    uint32_t resourceOffset;
-    uint32_t pcmDirectoryOffset;
+    uint16_t trackSize;
+    uint16_t patternDirectoryOffset;
+    uint16_t instrumentOffset;
+    uint16_t resourceOffset;
+    uint16_t pcmDirectoryOffset;
     uint32_t timingRemainder;
     uint16_t orderCount;
     uint16_t restartOrder;
@@ -112,13 +116,25 @@ typedef struct _TrackerVm {
     uint8_t nextRow;
     uint8_t flowPending;
     uint8_t status;
+    /* Fields after status: keep C and TrackerPlayer.inc offset equal. */
+    uint8_t patternDelay;
+    uint8_t holdRow;
+    uint8_t loopStart;
+    uint8_t loopCount;
+    uint8_t loopJump;
+    uint16_t useSampleOffsetMask;
+    uint16_t noteDelayMask;
+    uint8_t sampleOffset[WT_VOICE_COUNT];
+    uint8_t noteDelayRemain[WT_VOICE_COUNT];
+    uint8_t delayedNote[WT_VOICE_COUNT];
+    uint8_t delayedInstrument[WT_VOICE_COUNT];
+    uint8_t delayedVolume[WT_VOICE_COUNT];
 } TrackerVm;
 
 typedef struct _TrackerScheduler {
-    ScoreStream playlistStream;
     int16_t currentTrack;
     int16_t requestedTrack;
-    uint32_t playlistSize;
+    uint16_t playlistSize;
     uint16_t trackCount;
     uint8_t mode;
     uint8_t switchPending;

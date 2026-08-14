@@ -74,22 +74,16 @@ column 或损坏资源；生成完整且 CRC 有效的 T10P；最终 clean link 
 
 ## 2026-08-13 批量结果
 
-对 Modland 的 Cerror、Dalezy、Dubmood 共 390 首本地 XM 重扫：加入 `Bxx/Dxx`
-控制流、`ECx` note cut、volume-column `6x/7x` lowering，并对 `6xy`、`9xx`、
-`EDx`、volume-column `8x/9x` 作明确告警的有损近似后，转换通过数从 28 提升到
-152；按当时的固定固件开销计算，143 首可单独链接，9 首因 T10P 过大
-排除。`music/xm/MANIFEST.tsv` 保存逐首结果、warning、哈希和 URL。
-加上单独收录的 JAM、Super Mario 2、Traven Tetris high scores、贝多芬
-`Fur Elise`、Rez + Kenet 的 `Unreeeal Superhero 3` 和 Quazar 的
-`Funky Stars`，当前集合共 149 对 XM/T10P：13 首 `exact`，136 首
-`approximate`。按忠实线性音量模型重建后，149 首均可单独装入当前
-65,024-byte 程序区；全部通过 fresh compile
-逐字节比对和 SHA-256 校验。
+对 Modland 的 Cerror、Dalezy、Dubmood 共 390 首本地 XM 重扫（2026-08-13）：
+加入 `Bxx/Dxx` 控制流、`ECx` note cut、volume-column lowering 等后，转换通过数
+从 28 提升到 152；`music/xm/MANIFEST.tsv` 保存逐首结果。加上单独收录的 JAM、
+Super Mario 2、Traven Tetris、贝多芬 `Fur Elise`、`Unreeeal Superhero 3`、
+`Funky Stars` 等，集合共 149 对 XM/T10P。
 
-2026-08-14 再次以当前线性音量 lowering 和 Funky Stars clean build 校准容量：
-固件总计 60,797 字节，其中 T10P 为 30,564 字节，固定开销为 30,233 字节。
-MANIFEST 中的 149 首仍全部能单独装入 65,024-byte 程序区。容量边缘曲目仍须用
-自己的 `scoreList.c` 做真实 clean link，不能只依赖批处理估算。
+**2026-08-14 起设备已支持真 `5xx`/`6xx`/`7xx`/`9xx`/`EDx`/`E6x`/`EEx` 等**；
+旧 MANIFEST 里把这些标成“有损近似”的条目反映的是当时工具状态，重新
+`compile` 后应以当前 warning 为准。容量边缘曲目须用自己的 `scoreList.c` 做
+真实 clean link（默认 `wave` 策略下固定开销约 34 KiB 量级，随固件变化）。
 
 `Unreeeal Superhero 3` 来源：
 
@@ -104,14 +98,14 @@ https://ftp.modland.com/pub/modules/Fasttracker%202/Quazar/funky%20stars.xm
 进入既有 terminal 静音路径。restart pattern 有音乐内容、非 `Fxx` effect，或在
 order 列表中被多次引用时不会套用此规则。
 
-当前剩余阻塞点以超过 10 通道、`E6x` pattern loop、复合效果、损坏/非标准 XM
-为主。优先级建议：
+当前剩余阻塞点以超过 10 通道、复合效果、损坏/非标准 XM 为主。`E6x`/`EEx`
+已进入设备 VM。优先级建议：
 
 | 特性 | 建议 | 理由 |
 |---|---|---|
-| `EDx` 精确 note delay | 后续实现 | 当前 tick 0 近似；精确版需要延迟 note/instrument 状态 |
-| `9xx` 精确 sample offset | 后续实现 | 当前从头播放；PCM offset、波表语义和参数记忆需定义 |
-| `E6x` pattern loop | 谨慎实现 | 需要 pattern loop row/count 状态及嵌套边界 |
+| `EDx` 精确 note delay | 已实现 | 设备倒计时；含 pattern-delay hold |
+| `9xx` 精确 sample offset | 已实现 | PCM 触发时 skip；host 缩放参数 |
+| `E6x` pattern loop | 已实现 | 全局 start/count；不支持嵌套 |
 | 无效 sample/envelope loop | 可选修复模式 | 只能在明确 warning 下 clamp，默认仍拒绝损坏输入 |
 | 超过 10 通道 | 不直接截断 | 固定十声道产品边界；离线选择可能明显改变编曲 |
 

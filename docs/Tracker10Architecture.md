@@ -1,10 +1,13 @@
 # Tracker10 Architecture
 
+Flash / TrackerPlayer size work (measurement, dual-DPTR MOVC helpers, instrument
+layout, host-trusted validation): [TrackerPlayerSizeOptimization.md](TrackerPlayerSizeOptimization.md).
+
 ## Product boundary
 
 Tracker10 is a generic ten-channel 8-bit wavetable tracker player for the
-STC8H3K64S2. It is not an NES, APU, VRC, MIDI or DPCM emulator. Source modules
-are compiled offline to T10P/T10M v4; the MCU never parses XM structures or
+STC8H3K64S2. It is not an NES, APU, VRC, MIDI or DPCM emulator. Source modules (FastTracker II XM or ProTracker-compatible MOD)
+are compiled offline to T10P/T10M v4; the MCU never parses XM/MOD structures or
 sample data.
 
 The design preserves high-level tracker structure instead of expanding a song
@@ -18,9 +21,9 @@ Teaching-oriented walkthrough of this pipeline:
 
 
 ```text
-XM bytes
-  -> bounds-checked XM parser
-  -> source patterns, orders, instruments, envelopes and decoded samples
+XM or MOD bytes
+  -> bounds-checked format parser (xm.py / mod.py)
+  -> source patterns, orders, instruments/samples and decoded PCM
   -> normalized ten-channel Tracker IR
   -> mono lowering and explicit unsupported-effect validation
   -> sample/instrument analysis
@@ -218,11 +221,8 @@ These values are from a clean build of the checked-in, faithful-linear-volume
 Funky Stars `scoreList.c`; its five PCM resources total 10,365 bytes. The fixed
 firmware overhead is 30,233 bytes for collection capacity estimates.
 
-The SPI backend remains compiled and retains a 1 KiB XRAM read cache. T10M v4
-audio resources are internal-Code-Flash-only and opening v4 from SPI is rejected.
-The current PCB crosses the SPI
-data lines, so `SpiFlash.c` bit-bangs P3.2 clock, P3.3 MOSI, P3.4 MISO and P3.5
-chip select. Hardware SPI must not be enabled without a board wiring change.
+Score storage is internal Code Flash only (`scoreList.c` / `MOVC`). SPI NOR
+score backends have been removed.
 
 ## Timing and quality verification
 
@@ -260,7 +260,7 @@ release/fadeout and Amiga-effect work therefore remains outside the 32 kHz ISR
 and does not exhaust the producer queue.
 
 The first T10 v4 resource build was checked on the same board after compiling Funky
-Stars to 12 deduplicated song wavetables and five 8 kHz PCM percussion samples
+Stars to 12 deduplicated song wavetables and five 16 kHz PCM percussion samples
 totalling 5,185 bytes. This paragraph records the first v4 baseline; the current
 build uses the later 16 kHz resources. UART snapshots observed simultaneous PCM activity on two
 fixed tracker voices; the complete reference run contains ticks with three PCM

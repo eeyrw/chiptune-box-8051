@@ -79,6 +79,132 @@ class Song:
     pcm_samples: tuple[PcmSample, ...] = ()
 
 
+def _row_empty(row: tuple[Cell, ...]) -> bool:
+    return all(cell == Cell() for cell in row)
+
+
+def _pattern_keep_rows(pattern: tuple[tuple[Cell, ...], ...], min_rows: int) -> int:
+    last = 0
+    for index, row in enumerate(pattern):
+        if not _row_empty(row):
+            last = index
+        for cell in row:
+            if cell.effect == 0x0E and (cell.parameter >> 4) == 0x06:
+                last = max(last, index)
+    return max(last + 1, min_rows, 1)
+
+
+def _destination_break_mins(song: Song) -> list[int]:
+    """Per-pattern minimum rows required by Dxx landing on that pattern."""
+    mins = [1] * len(song.patterns)
+    order_count = len(song.orders)
+    for order_index, pattern_index in enumerate(song.orders):
+        pattern = song.patterns[pattern_index]
+        next_order = (order_index + 1) % order_count if order_count else 0
+        break_row = None
+        for row in pattern:
+            for cell in row:
+                if cell.effect == 0x0B:
+                    next_order = cell.parameter % order_count if order_count else 0
+                elif cell.effect == 0x0D:
+                    break_row = (cell.parameter >> 4) * 10 + (cell.parameter & 15)
+        if break_row is not None and order_count:
+            dest = song.orders[next_order]
+            mins[dest] = max(mins[dest], break_row + 1)
+    return mins
+
+
+def optimize_song(song: Song) -> Song:
+    """Drop unreferenced instruments/resources and trailing empty pattern rows."""
+    used_instruments: set[int] = set()
+    for pattern in song.patterns:
+        for row in pattern:
+            for cell in row:
+                if cell.instrument:
+                    used_instruments.add(cell.instrument)
+
+    if not used_instruments:
+        used_instruments.add(1)
+
+    ordered = sorted(i for i in used_instruments if 1 <= i <= len(song.instruments))
+    if not ordered:
+        ordered = [1] if song.instruments else []
+    remap = {old: new for new, old in enumerate(ordered, start=1)}
+    for instrument in used_instruments:
+        if instrument and instrument not in remap:
+            raise ValueError(f"pattern references unknown instrument {instrument}")
+
+    break_mins = _destination_break_mins(song)
+    patterns = []
+    for pattern_index, pattern in enumerate(song.patterns):
+        keep = min(_pattern_keep_rows(pattern, break_mins[pattern_index]), len(pattern))
+        if break_mins[pattern_index] > len(pattern):
+            raise ValueError(
+                f"pattern break targets row {break_mins[pattern_index] - 1} "
+                f"but pattern {pattern_index} only has {len(pattern)} rows")
+        new_rows = []
+        for row in pattern[:keep]:
+            new_rows.append(tuple(
+                Cell(cell.note,
+                     remap[cell.instrument] if cell.instrument else 0,
+                     cell.volume, cell.effect, cell.parameter)
+                for cell in row
+            ))
+        patterns.append(tuple(new_rows))
+
+    instruments: list[Instrument] = []
+    waves: list[tuple[int, ...]] = []
+    pcm_samples: list[PcmSample] = []
+    wave_map: dict[int, int] = {}
+    pcm_map: dict[int, int] = {}
+
+    for old in ordered:
+        instrument = song.instruments[old - 1]
+        mode = instrument.mode
+        if 0 <= mode < len(song.waves):
+            if mode not in wave_map:
+                wave_map[mode] = len(waves)
+                waves.append(song.waves[mode])
+            mode = wave_map[mode]
+        elif MODE_PCM_BASE <= mode < MODE_PCM_BASE + len(song.pcm_samples):
+            pcm_index = mode - MODE_PCM_BASE
+            if pcm_index not in pcm_map:
+                pcm_map[pcm_index] = len(pcm_samples)
+                pcm_samples.append(song.pcm_samples[pcm_index])
+            mode = MODE_PCM_BASE + pcm_map[pcm_index]
+        instruments.append(Instrument(
+            mode=mode,
+            gain=instrument.gain,
+            relative_pitch=instrument.relative_pitch,
+            volume_macro=instrument.volume_macro,
+            volume_step=instrument.volume_step,
+            volume_flags=instrument.volume_flags,
+            volume_sustain=instrument.volume_sustain,
+            volume_loop_start=instrument.volume_loop_start,
+            volume_loop_end=instrument.volume_loop_end,
+            fadeout=instrument.fadeout,
+            pitch_macro=instrument.pitch_macro,
+            pitch_loop=instrument.pitch_loop,
+        ))
+
+    if not waves:
+        waves.append(DEFAULT_WAVE if not song.waves else song.waves[0])
+    if not instruments:
+        instruments.append(Instrument(mode=0, gain=0))
+
+    return Song(
+        song.orders,
+        song.restart,
+        song.speed,
+        song.bpm,
+        tuple(patterns),
+        tuple(instruments),
+        amiga_effects=song.amiga_effects,
+        waves=tuple(waves),
+        pcm_samples=tuple(pcm_samples),
+    )
+
+
 def _encode_cell(cell: Cell) -> bytes:
     mask = 0
     out = bytearray()

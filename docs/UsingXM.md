@@ -5,7 +5,8 @@
 PCM one-shot。
 各 Python 命令的完整参数和副作用见 [PythonTools.md](PythonTools.md)。
 若要理解 XM 字节如何一步步变成 T10P，见教学文档
-[XMCompilation.md](XMCompilation.md)。
+[XMCompilation.md](XMCompilation.md)。ProTracker 兼容 MOD 使用同一 T10P 目标与
+`tracker10_tool.py compile/inspect`；批量结果见 [MODCollection.md](MODCollection.md)。
 
 ## 1. 环境与输入要求
 
@@ -14,12 +15,11 @@ PCM one-shot。
 
 - 最多 10 个 XM 声道；少于 10 路会补静音声道，多于 10 路直接拒绝；
 - 最多 16 张去重后的歌曲波表；
-- 音调采样被抽取为 16 点单周期波表；长且不循环的采样被编译为 16 kHz、
+- 默认优先 16 点波表；长非循环等可编为 16 kHz PCM（见 `--resource-policy`）；
   signed 8-bit PCM one-shot；
 - 当前程序区由芯片选项固定为 65024 字节，不是完整 65536 字节；
 - 输出是单声道，XM 的声像命令会被丢弃；
-- SPI 后端仍保留，但 T10M v4 音频资源当前只能从内部 Code Flash 通过 `MOVC`
-  读取。没有安装 SPI Flash 不影响本流程。
+- 曲谱只从内部 Code Flash 经 `MOVC` 读取（`scoreList.c`）。
 
 先在 MilkyTracker 中确认 XM 自身可以正常播放。不要把原曲里已有的节奏跳动、
 采样截断或失真误判为转换器问题。
@@ -66,21 +66,27 @@ volume-column 命令、超过 16 张波表、XM 损坏或截断。错误位置�
 | `1xx` / `2xx` | pitch slide up/down |
 | `3xx` | tone portamento，含参数记忆且不重触发相位 |
 | `4xy` | vibrato |
-| `6xy` | 保留 volume slide，舍弃 vibrato 并报告 warning |
+| `5xy` | tone porta + volume slide（同 tick） |
+| `6xy` | vibrato + volume slide（同 tick） |
+| `7xy` | tremolo |
 | `8xx` | 接受但丢弃声像，因为输出为单声道 |
-| `9xx` | 当前从采样开头播放并报告 warning |
+| `9xx` | PCM 采样偏移（使用 9xx 的乐器强制编为 PCM） |
 | `Axy` | volume slide |
 | `Bxx` | 下一行跳到指定 order |
 | `Cxx` | tick 0 设置绝对音量 `00..40` |
 | `Dxx` | 下一行进入下一 order 的十进制 `xx` 行；可与 `Bxx` 组合 |
+| `E1x` / `E2x` | fine porta，tick 0 一次 |
+| `E6x` | pattern loop（`E60` 起点，`E6x` 循环） |
+| `EAx` / `EBx` | fine volume，tick 0 一次 |
 | `ECx` | 在 tick x note cut |
-| `EDx` | 当前在 tick 0 触发并报告 warning |
+| `EDx` | note delay，延迟 x 个 tick 再触发 |
+| `EEx` | pattern delay，延长当前行 |
 | `E9x` | note retrigger |
 | `Fxx` | speed/BPM |
 
-volume column 当前接受 `10..50` 音量设定、`6x/7x` 音量滑动和 `C0..CF`
-panning。`6x/7x` 在没有 main effect 时降为 `Axy`；同一 cell 已有 main effect 时
-舍弃并报告 warning。`8x/9x` fine volume slide 和 panning 当前舍弃并报告 warning。
+volume column 当前接受 `10..50` 音量设定、`6x/7x` 音量滑动、`8x/9x` fine volume
+（降为 `EAx`/`EBx`）和 `C0..CF` panning。`6x/7x`/`8x/9x` 在没有 main effect 时
+生效；同一 cell 已有 main effect 时舍弃并报告 warning。panning 丢弃并 warning。
 其他命令明确拒绝，避免无提示地播放成错误音乐。
 
 ### 音量是线性幅度，不是 dB
@@ -111,7 +117,10 @@ restart 循环和有内容的末尾 pattern 不受影响。
 - instrument automatic vibrato 尚未渲染；
 - 多采样乐器目前只选择该乐器最常用音符映射的一个 sample，尚未拆分 key zone；
 - instrument-only cell 只有简化语义；
-- 非循环短采样可能被压成波表，长 one-shot 才成为 PCM；
+- 默认 `--resource-policy wave`：循环≥8 → 16 点波表；非循环且长度>256 → PCM；
+  短非循环也可成波表（可能一直响到 cut）。`--resource-policy pcm` 时与 MOD 类似，
+  仅 8..64 循环为波表，其余为 PCM；
+- 默认不按 note 拆 PCM（`--multi-note-pcm` 可开启，体积更大）；
 - 包络最多编译为 16 个定时点，因此极复杂包络是有界近似。
 
 这些限制的设计和审计细节见 [XMCompatibilityAudit.md](XMCompatibilityAudit.md)。

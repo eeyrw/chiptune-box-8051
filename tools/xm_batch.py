@@ -14,14 +14,20 @@ from urllib.parse import quote
 
 try:
     from tracker10.format import inspect_playlist, pack_playlist
+    from tracker10.mod import ModError, analyze_mod, compile_mod, is_mod, parse_mod
     from tracker10.xm import XmError, analyze_xm, compile_xm, parse_xm
 except ModuleNotFoundError:  # Imported as tools.xm_batch by the test suite.
     from tools.tracker10.format import inspect_playlist, pack_playlist
+    from tools.tracker10.mod import ModError, analyze_mod, compile_mod, is_mod, parse_mod
     from tools.tracker10.xm import XmError, analyze_xm, compile_xm, parse_xm
 
 
+# Historical column names keep "xm_" for source-module size/hash so existing
+# XM manifests remain readable. They apply to MOD sources as well.
 FIELDS = ("status", "grade", "xm_bytes", "t10p_bytes", "firmware_bytes",
           "xm_sha256", "t10p_sha256", "warnings", "source_url", "path", "error")
+
+SOURCE_SUFFIXES = {".xm", ".mod"}
 
 
 def atomic_write(path: Path, data: bytes) -> None:
@@ -76,13 +82,28 @@ def resolve_source(relative: Path, exact: dict[str, str], roots: dict[str, str])
 
 
 def compile_one(path: Path) -> tuple[bytes, dict]:
-    module = parse_xm(path.read_bytes())
-    info = analyze_xm(module)
-    track, compiled = compile_xm(module)
+    data = path.read_bytes()
+    if data[:17] == b"Extended Module: " or path.suffix.lower() == ".xm":
+        module = parse_xm(data)
+        info = analyze_xm(module)
+        track, compiled = compile_xm(module)
+        info["format"] = "xm"
+    elif is_mod(data) or path.suffix.lower() == ".mod":
+        module = parse_mod(data)
+        info = analyze_mod(module)
+        track, compiled = compile_mod(module)
+        info["format"] = "mod"
+    else:
+        raise ValueError("unsupported module format")
     image = pack_playlist([track])
     inspect_playlist(image)
     info["compiled"] = compiled
     return image, info
+
+
+def iter_modules(root: Path):
+    return sorted(path for path in root.rglob("*") if path.is_file()
+                  and path.suffix.lower() in SOURCE_SUFFIXES)
 
 
 def write_tsv(path: Path, rows: list[dict[str, object]]) -> None:
@@ -103,15 +124,14 @@ def scan(args: argparse.Namespace) -> int:
     exact = parse_assignments(args.source, "--source")
     roots = parse_assignments(args.source_root, "--source-root")
     rows = []
-    for xm in sorted(path for path in args.input.rglob("*") if path.is_file()
-                     and path.suffix.lower() == ".xm"):
-        relative = xm.relative_to(args.input)
+    for module_path in iter_modules(args.input):
+        relative = module_path.relative_to(args.input)
         row: dict[str, object] = {field: "" for field in FIELDS}
-        row.update(path=relative.as_posix(), xm_bytes=xm.stat().st_size,
-                   xm_sha256=sha256(xm.read_bytes()),
+        row.update(path=relative.as_posix(), xm_bytes=module_path.stat().st_size,
+                   xm_sha256=sha256(module_path.read_bytes()),
                    source_url=resolve_source(relative, exact, roots))
         try:
-            image, info = compile_one(xm)
+            image, info = compile_one(module_path)
             warnings = "; ".join(info["warnings"])
             total = overhead + len(image)
             row.update(status="fit" if total <= args.flash_limit else "too-large",
@@ -124,9 +144,9 @@ def scan(args: argparse.Namespace) -> int:
             if args.collect is not None and total <= args.flash_limit:
                 target = args.collect / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(xm, target)
+                shutil.copy2(module_path, target)
                 atomic_write(target.with_suffix(".t10p"), image)
-        except (OSError, ValueError, XmError) as exc:
+        except (OSError, ValueError, XmError, ModError) as exc:
             row.update(status="incompatible", error=str(exc))
         rows.append(row)
     write_tsv(args.report, rows)
@@ -142,34 +162,34 @@ def manifest(args: argparse.Namespace) -> int:
     roots = parse_assignments(args.source_root, "--source-root")
     rows = []
     failed = False
-    for xm in sorted(path for path in args.collection.rglob("*") if path.is_file()
-                     and path.suffix.lower() == ".xm"):
-        relative = xm.relative_to(args.collection)
-        t10p = xm.with_suffix(".t10p")
+    for module_path in iter_modules(args.collection):
+        relative = module_path.relative_to(args.collection)
+        t10p = module_path.with_suffix(".t10p")
         row: dict[str, object] = {field: "" for field in FIELDS}
-        row.update(path=relative.as_posix(), xm_bytes=xm.stat().st_size,
-                   xm_sha256=sha256(xm.read_bytes()),
+        row.update(path=relative.as_posix(), xm_bytes=module_path.stat().st_size,
+                   xm_sha256=sha256(module_path.read_bytes()),
                    source_url=resolve_source(relative, exact, roots))
         try:
             if not t10p.is_file():
                 raise ValueError("matching .t10p is missing")
             stored = t10p.read_bytes()
             inspect_playlist(stored)
-            rebuilt, info = compile_one(xm)
+            rebuilt, info = compile_one(module_path)
             if rebuilt != stored:
                 raise ValueError("stored T10P does not match a fresh compile")
             warnings = "; ".join(info["warnings"])
             row.update(status="verified", grade="exact" if not warnings else "approximate",
                        t10p_bytes=len(stored), t10p_sha256=sha256(stored), warnings=warnings)
-        except (OSError, ValueError, XmError) as exc:
+        except (OSError, ValueError, XmError, ModError) as exc:
             failed = True
             row.update(status="invalid", error=str(exc))
         rows.append(row)
     write_tsv(args.report, rows)
     checksum_lines = []
     for path in sorted(p for p in args.collection.rglob("*") if p.is_file()
-                       and p.suffix.lower() in (".xm", ".t10p")):
-        checksum_lines.append(f"{sha256(path.read_bytes())}  {path.relative_to(args.collection).as_posix()}\n")
+                       and p.suffix.lower() in (".xm", ".mod", ".t10p")):
+        checksum_lines.append(
+            f"{sha256(path.read_bytes())}  {path.relative_to(args.collection).as_posix()}\n")
     atomic_write(args.checksums, "".join(checksum_lines).encode("utf-8"))
     print(json.dumps({"files": len(rows), "verified": sum(r["status"] == "verified" for r in rows),
                       "invalid": sum(r["status"] == "invalid" for r in rows)}, indent=2))
@@ -177,13 +197,15 @@ def manifest(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Batch-scan and verify Tracker10 XM collections")
+    parser = argparse.ArgumentParser(
+        description="Batch-scan and verify Tracker10 XM/MOD collections")
     commands = parser.add_subparsers(dest="command", required=True)
-    scan_parser = commands.add_parser("scan", help="recursively compile and classify XM files")
+    scan_parser = commands.add_parser("scan", help="recursively compile and classify modules")
     scan_parser.add_argument("input", type=Path)
     scan_parser.add_argument("--report", type=Path, required=True)
     scan_parser.add_argument("--output", type=Path, help="write every compatible T10P here")
-    scan_parser.add_argument("--collect", type=Path, help="copy only flash-fitting XM/T10P pairs here")
+    scan_parser.add_argument("--collect", type=Path,
+                             help="copy only flash-fitting source/T10P pairs here")
     scan_parser.add_argument("--flash-limit", type=int, default=65024)
     scan_parser.add_argument("--firmware-overhead", type=int)
     scan_parser.add_argument("--firmware-bin", type=Path, default=Path("music-box-8051.bin"))
@@ -193,12 +215,14 @@ def main() -> int:
         command.add_argument("--source-root", action="append", default=[], metavar="PATH=BASE_URL")
     scan_parser.set_defaults(run=scan)
 
-    manifest_parser = commands.add_parser("manifest", help="verify XM/T10P pairs and write hashes")
+    manifest_parser = commands.add_parser(
+        "manifest", help="verify source/T10P pairs and write hashes")
     manifest_parser.add_argument("collection", type=Path)
     manifest_parser.add_argument("--report", type=Path, required=True)
     manifest_parser.add_argument("--checksums", type=Path, required=True)
     manifest_parser.add_argument("--source", action="append", default=[], metavar="PATH=URL")
-    manifest_parser.add_argument("--source-root", action="append", default=[], metavar="PATH=BASE_URL")
+    manifest_parser.add_argument("--source-root", action="append", default=[],
+                                 metavar="PATH=BASE_URL")
     manifest_parser.set_defaults(run=manifest)
     args = parser.parse_args()
     try:
