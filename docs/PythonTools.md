@@ -126,6 +126,11 @@ python3 tools/xm_batch.py manifest /path/to/collection \
 可用 `--port PATH --baud N` 覆盖。每次命令打开串口、发送一帧、校验响应 command、
 长度、状态和 XOR checksum，然后关闭串口。
 
+同一时间只能有一个串口客户端。不要并行启动两个 `musicbox_proto.py`，否则一个
+进程可能读走另一个请求的响应，表现为 `response command ... does not match`、
+`invalid response header` 或超时。需要连续采样时应在一个客户端进程内串行发送
+命令，普通人工诊断则逐条等待命令结束。
+
 ### 只读命令
 
 | 命令 | 输出 |
@@ -156,7 +161,9 @@ python3 tools/musicbox_proto.py reset
 ```
 
 `mute` 接受 `0x000..0x7ff`；bit 0..9 是十个 voice，bit 10 是 PCM-only 诊断 mute。
-`reset` 不等响应，立即触发 MCU 进入 bootloader，通常由 `make flash` 调用。
+`reset` 不等响应，立即请求 MCU 复位，`make flash` 会先调用同一 framed RESET。
+当前板仍应按“先启动 `stcgal` 等待，再手动上电”的流程下载，不能仅依赖软件
+RESET。
 
 ### SPI Flash 修改命令
 
@@ -250,6 +257,23 @@ make flash-xm TRACKER_INPUT="/path/to/song.xm" \
 它依次执行完整 XM 编译、T10P/生成 C 输出、clean firmware build、复制 HEX 和
 `make flash`。生成源位于 `build/xm/scoreList.c`，不会覆盖仓库的 `scoreList.c`。
 只需要文件而不操作硬件时使用 `make xm-hex`。
+
+`build/xm/` 会保留最近一次转换结果。若用户在两次下载之间换过歌曲，单独执行
+`make flash SCORE_SOURCE=build/xm/scoreList.c` 会烧入该目录当前保存的歌曲，而
+不是命令行中没有再次声明的旧 `TRACKER_INPUT`。要避免混淆，重新执行完整
+`flash-xm TRACKER_INPUT=...`，或为重要试听设置独立 `XM_BUILD_DIR` 并校验 T10P：
+
+```bash
+make xm-hex TRACKER_INPUT="music/xm/Quazar/funky stars.xm" \
+  XM_BUILD_DIR=build/funky-stars \
+  XM_T10P_OUTPUT=build/funky-stars/song.t10p \
+  XM_SCORE_C=build/funky-stars/scoreList.c \
+  XM_HEX_OUTPUT=build/funky-stars/funky-stars.hex
+cmp build/funky-stars/song.t10p "music/xm/Quazar/funky stars.t10p"
+make flash SCORE_SOURCE=build/funky-stars/scoreList.c
+```
+
+最后一条命令启动后，等 `Waiting for MCU, please cycle power` 再给板子上电。
 
 可覆盖变量：
 

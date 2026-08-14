@@ -68,7 +68,6 @@ SRC 	+= $(SCORE_SOURCE)
 
 ASM_SRC =
 ASM_SRC   += WavetableSynth/WavetableSynthAsm.s
-ASM_SRC   += WavetableSynth/WavetableSynthStep.s
 ASM_SRC   += WavetableSynth/PeriodTimer.s
 ASM_SRC   += WavetableSynth/AudioRender.s
 
@@ -136,8 +135,7 @@ ifneq ($(MAKECMDGOALS),clean)
 # the dependency is manually written here.	
 WavetableSynth/PeriodTimer.rel: WavetableSynth/WavetableSynth.inc WavetableSynth/8051.inc WavetableSynth/UpdateTick.inc
 WavetableSynth/WavetableSynthAsm.rel: WavetableSynth/WavetableSynth.inc
-WavetableSynth/WavetableSynthStep.rel: WavetableSynth/WavetableSynth.inc
-WavetableSynth/AudioRender.rel: WavetableSynth/WavetableSynth.inc
+WavetableSynth/AudioRender.rel: WavetableSynth/WavetableSynth.inc WavetableSynth/WavetableSynthStep.inc TrackerPlayer/TrackerPlayer.inc
 endif
 
 

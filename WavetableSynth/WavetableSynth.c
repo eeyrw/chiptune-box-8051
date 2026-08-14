@@ -57,21 +57,3 @@ uint8_t AudioBufferLevel(void)
 {
     return (uint8_t)(audioWrite - audioRead);
 }
-
-uint8_t AudioRenderProcess(void)
-{
-    uint8_t budget = 16;
-    uint8_t write = audioWrite;
-    uint8_t peak = 0;
-    while (budget-- && (uint8_t)(write - audioRead) != 0xFF) {
-        uint8_t amplitude;
-        AudioRenderOne();
-        audioBuffer[write++] = wavetableSynth.pwmSample;
-        amplitude = wavetableSynth.pwmSample >= 128
-                  ? wavetableSynth.pwmSample - 128
-                  : 128 - wavetableSynth.pwmSample;
-        if (amplitude > peak) peak = amplitude;
-        audioWrite = write;
-    }
-    return peak;
-}

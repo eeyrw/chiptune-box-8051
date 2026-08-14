@@ -42,3 +42,8 @@ count in the 255-byte effective ring.
 SPI erase/write is rejected while playback is active. On boards without the
 SPI NOR populated, flash commands return `NOT_SUPPORTED` and playback uses the
 internal `scoreList.c` image.
+
+Only one host process may own the UART at a time. Requests have no transaction
+identifier beyond the command byte, so concurrent clients can consume each
+other's frames. `tools/musicbox_proto.py` resets its input buffer before each
+request, but that does not make parallel invocations safe.

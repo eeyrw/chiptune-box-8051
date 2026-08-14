@@ -1,3 +1,4 @@
+#include <stddef.h>
 #include <string.h>
 #include "TrackerPlayer.h"
 #include "SpiFlash.h"
@@ -27,6 +28,11 @@ extern MEM_CODE(unsigned char) Score[];
 extern MEM_CODE(uint32_t) ScoreSize;
 
 static MEM_XDATA(TrackerControlEvent) decodeEvent;
+
+typedef char TrackerEventSizeMustMatchAsm[(sizeof(TrackerControlEvent) == 57) ? 1 : -1];
+typedef char TrackerQueueHeadMustMatchAsm[(offsetof(TrackerControlQueue, head) == 228) ? 1 : -1];
+typedef char TrackerVmStatusMustMatchAsm[(offsetof(TrackerPlayer, vm)
+                                        + offsetof(TrackerVm, status) == 0x326) ? 1 : -1];
 static MEM_CODE(int8_t) vibratoSine[16] = {
       0,  49,  90, 117, 127, 117,  90,  49,
       0, -49, -90,-117,-127,-117, -90, -49
@@ -698,45 +704,6 @@ void TrackerPlayerProcess(MEM_XDATA(TrackerPlayer) *player)
         if (!queue_commit(&decodeEvent)) return;
         if (vm->status == TRACKER_PRIMING) vm->status = TRACKER_PLAYING;
         if (decodeEvent.terminal) return;
-    }
-}
-
-void TrackerPlayerSampleTick(void) __using(1)
-{
-    uint8_t i, head;
-    uint16_t bit;
-    MEM_XDATA(TrackerControlEvent) *event;
-    if (trackerQueue.countdown) { trackerQueue.countdown--; return; }
-    if (trackerQueue.head == trackerQueue.tail) {
-        if (mainPlayer.vm.status == TRACKER_PLAYING) trackerQueue.underruns++;
-        return;
-    }
-    head = trackerQueue.head;
-    event = &trackerQueue.slots[head & (TRACKER_QUEUE_LENGTH - 1)];
-    bit = 1;
-    for (i = 0; i < WT_VOICE_COUNT; i++, bit <<= 1) if (event->changedMask & bit) {
-        if (event->voice[i].volume & 0x80) {
-            wavetableSynth.voice[i].phase[0] = event->voice[i].increment[0];
-            wavetableSynth.voice[i].phase[1] = event->voice[i].increment[1];
-            wavetableSynth.voice[i].phase[2] = event->voice[i].increment[2];
-            wavetableSynth.voice[i].increment[0] = event->voice[i].waveOffset;
-            wavetableSynth.voice[i].increment[2] = i & 1;
-            wavetableSynth.voice[i].volume = event->voice[i].volume;
-            continue;
-        }
-        if (event->resetMask & bit)
-            wavetableSynth.voice[i].phase[0] = wavetableSynth.voice[i].phase[1] = wavetableSynth.voice[i].phase[2] = 0;
-        wavetableSynth.voice[i].increment[0] = event->voice[i].increment[0];
-        wavetableSynth.voice[i].increment[1] = event->voice[i].increment[1];
-        wavetableSynth.voice[i].increment[2] = event->voice[i].increment[2];
-        wavetableSynth.voice[i].volume = event->voice[i].volume;
-        wavetableSynth.voice[i].waveOffset = event->voice[i].waveOffset;
-    }
-    trackerQueue.countdown = event->waitSamples ? event->waitSamples - 1 : 0;
-    trackerQueue.head = head + 1;
-    if (event->terminal) {
-        mainPlayer.vm.status = TRACKER_STOPPED;
-        WavetableSynthSilence();
     }
 }
 

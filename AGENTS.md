@@ -21,13 +21,17 @@ does not parse tracker effects in real time.
 ## Runtime
 
 - STC8H3K64S2: 64 KiB Flash, 256 B IRAM, 3 KiB internal XRAM.
-- 32 kHz Timer0 audio ISR uses register bank 2 and only consumes one byte from
-  the 256-byte XRAM audio ring.
+- All firmware uses register bank 0. The 32 kHz Timer0 audio ISR explicitly
+  saves only A, DPTR, PSW and R0 and consumes one byte from the 256-byte XRAM
+  audio ring.
 - Ten fixed voices, no dynamic voice allocation.
 - Hot state is absolute DATA `0x21`, 90 bytes; keep C and `.inc` layouts equal.
 - Each voice: phase24, increment24, volume8, prepacked waveform offset8.
-- `WavetableSynthStep.s` is the only synthesis hot path, is unrolled ten times,
-  and runs through `AudioRenderOne` in the main thread using register bank 1.
+- `AudioRender.s` is the main-thread render hot path and contains no per-sample
+  calls. It includes the ten-lane unrolled `WavetableSynthStep.inc` body and
+  briefly stacks the three batch registers that live across each inline step.
+- PWM2P/P1.2 and PWM2N/P1.3 drive opposite Class-D bridge legs. They are strict
+  complements with hardware dead time set to zero.
 - Main loop runs effects, timed envelopes, release/fadeout, fills a four-entry
   control queue, and pre-renders a 255-sample effective audio ring.
 - Pitch conversion, effects and instrument state belong in the main loop, never ISR.

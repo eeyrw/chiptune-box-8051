@@ -137,6 +137,12 @@ make compile-tracker \
 的 `scoreList.c`；如果只生成 `.t10p` 而没有更新 `scoreList.c`，重新下载后仍会
 播放旧曲。
 
+仓库根目录的 `scoreList.c` 是默认 `make` 使用的内置曲谱，当前与
+`music/xm/Quazar/funky stars.t10p` 一致。`build/xm/scoreList.c` 是 Makefile
+隔离工作流的临时输入，可能保留上一次转换的歌曲。不要仅凭文件名
+`build/xm/song.t10p` 判断当前固件中是哪首；应以本次 `TRACKER_INPUT`、链接 map
+中的 `scoreList.rel` 路径和生成物哈希为准。
+
 可以独立校验生成物的 playlist 目录、每首 T10M 范围、CRC、资源表和 pattern：
 
 ```bash
@@ -219,9 +225,16 @@ python3 tools/musicbox_proto.py ping
 make flash
 ```
 
-`make flash` 会先通过协议发送 RESET，使 MCU 自动进入 STC bootloader，再由
-`stcgal` 下载。通常不需要手动断电。如果自动 RESET 没收到响应，`stcgal` 会停在
-`Waiting for MCU, please cycle power`，此时再按提示断电/上电。
+`make flash` 会先尝试发送协议 RESET，再启动 `stcgal`。当前这块板的可靠流程是：
+
+1. 先让板子断电；
+2. 运行 `make flash` 或 `make flash-xm ...`；
+3. 等终端出现 `Waiting for MCU, please cycle power`；
+4. 再给板子上电，并在整个擦写过程中保持供电；
+5. 看到 `Finishing write: done`、目标 UID 和 `Disconnected!` 后才完成。
+
+不要先上电再启动下载器，也不要在写入百分比尚未结束时重新上电。某些情况下协议
+RESET 可以直接进入 ISP，但不能把它当作这块板的可靠操作流程。
 
 若 by-id 路径不存在，先查看实际设备：
 
@@ -300,3 +313,16 @@ python3 tools/musicbox_proto.py mute 0
 不要通过修改 Timer0 时钟来掩盖曲谱语义或采样问题。时钟以
 `Bsp.c` 的 `MAIN_Fosc=33177600UL` 为准；Makefile 的 `F_CPU` 默认值不决定 UART
 或 Timer0 实际时序。
+
+### Funky Stars 后段听感变快
+
+Funky Stars 初始 speed/BPM 固定为 `6/130`，整首没有 `Fxx`。每个 64-row order
+都耗时约 7.385 秒；order 0、1、2 分别只有 38、100、106 个 note event，而
+order 3 起通常升到 275..339 个。约 22.15 秒进入 order 3 时，鼓和细分事件密度
+陡增，因此听感更快，但 tick 没有变短。
+
+第一次播放 19 个 orders 约 140.31 秒，XM 的 restart order 是 3。循环后直接回到
+高密度的 order 3，跳过 22.15 秒的稀疏前奏，循环接缝也会强化“突然加速”的感觉。
+2026-08-14 板上从头采样 25.186 秒时，VM 名义曲谱位置为 25.481 秒；约 0.29 秒
+差值由四项预解码控制队列形成且保持恒定，没有累计时钟漂移。诊断详情见
+[XMCompatibilityAudit.md](XMCompatibilityAudit.md)。

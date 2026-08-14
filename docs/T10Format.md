@@ -144,7 +144,8 @@ The resource section begins with an eight-byte `T10R` header:
 | 6 | 2 | PCM sample rate | `16000` Hz |
 
 Immediately following the header are `wavetable count` signed 16-byte tables.
-Each table is one normalized oscillator cycle. Their location is fixed by the
+Each table is one phase-normalized oscillator cycle while retaining the selected
+source amplitudes; it is not peak-normalized or DC-centered. Their location is fixed by the
 count, so no per-wave directory is required and the ISR calculates a table
 address from `wave ID << 4`.
 

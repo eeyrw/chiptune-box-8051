@@ -1,14 +1,11 @@
-; Ten fixed voices. Tracker semantics and envelopes run in the main loop;
-; this 32 kHz hot path only generates two noise sources, mixes and advances phase.
-    .module WAVETABLE_SYNTH_STEP
-    .include "WavetableSynth.inc"
-
-    .globl _WavetableSynthStep
-    .globl _wavetableSynth
-    .globl _wavetableCodeBase
-
-    .area CSEG (CODE)
-_WavetableSynthStep::
+; Inline ten-voice synthesis body. AudioRender.s provides symbols and layout.
+;
+; Entry: bank 0 selected; absolute voice state is complete for this sample.
+; Scratch: R1 is mute/PCM-path state, R2:R3 is the wavetable base, R4 is gain,
+;          R5:R6:R7 is a signed 24-bit accumulator, A/B/DPTR/carry are clobbered.
+; Exit: pwmSample and signed mixOut are updated; execution falls through to the
+;       three outer-register POPs in AudioRender.s. There is intentionally no
+;       callable entry point, LCALL or RET in this include file.
     ; The active song's 256-byte wavetable bank lives in internal Code Flash.
     ; Its base changes only at track open, so fetch it once for all ten lanes.
     mov dptr,#_wavetableCodeBase
@@ -22,7 +19,10 @@ _WavetableSynthStep::
     mov r6,#0
     mov r7,#0
 
-    ; One long-period Galois LFSR shared by all mode-6 voices.
+    ; Advance each shared noise source exactly once per output sample, regardless
+    ; of how many channels select it. Advancing inside the lane macro would make
+    ; the noise pitch and sequence depend on voice count.
+    ; One long-period Galois LFSR is shared by all long-noise voices.
     mov a,(WT_SYNTH_ABS_ADDR + WT_NOISE_LONG_OFFSET)
     jnb acc.0,wt_long_zero$
     mov a,(WT_SYNTH_ABS_ADDR + WT_NOISE_LONG_OFFSET + 1)
@@ -48,7 +48,7 @@ wt_long_zero$:
     mov (WT_SYNTH_ABS_ADDR + WT_NOISE_LONG_SAMPLE_OFFSET),#0xA0
 wt_long_done$:
 
-    ; A short 7-bit source gives metallic/periodic mode-7 percussion.
+    ; A short 7-bit source gives metallic/periodic percussion.
     mov a,(WT_SYNTH_ABS_ADDR + WT_NOISE_SHORT_OFFSET)
     jnb acc.0,wt_short_zero$
     clr c
@@ -67,7 +67,8 @@ wt_short_done$:
 .irp Idx,0,1,2,3,4,5,6,7,8,9
     pVoice = WT_SYNTH_ABS_ADDR + Idx * WT_VOICE_SIZE
 
-    ; Muting suppresses mixing while DDS phase or PCM position keeps advancing.
+    ; Muting suppresses mixing while DDS phase or PCM position keeps advancing,
+    ; so unmuting a diagnostic channel does not restart or time-shift the song.
     mov r1,#0
     mov a,#(1 << (Idx & 7))
 .iflt Idx-8
@@ -99,7 +100,9 @@ wt_try_short_noise'Idx'$:
     mov a,(WT_SYNTH_ABS_ADDR + WT_NOISE_SHORT_SAMPLE_OFFSET)
     sjmp wt_sample'Idx'$
 
-    ; Song-specific tonal waveforms use 16 samples and a prepacked ID << 4.
+    ; Song-specific tonal waves contain 16 signed samples. phase[2].7..4 selects
+    ; the phase cell and waveOffset is prepacked as ID << 4, making OR produce
+    ; the complete 0..255 MOVC offset without a multiply in each lane.
 wt_table'Idx'$:
     mov a,(pVoice + WT_PHASE_2)
     swap a
@@ -115,7 +118,9 @@ wt_table'Idx'$:
     ; current sample, and increment[2] is a per-voice divide-by-two counter.
     ; Volume bit 7 tags PCM, bit 6 requests cache priming, and the low five bits
     ; retain mixer gain. Scale the 5-bit PCM control into the tonal lane's
-    ; 7-bit gain domain without applying any PCM-specific boost.
+    ; 7-bit gain domain without applying any PCM-specific boost. increment[2]
+    ; holds one output frame after each fetch, so each 16 kHz byte is emitted for
+    ; two 32 kHz render samples. Bit 6 primes a new trigger before cached reuse.
 wt_pcm'Idx'$:
     anl a,#0x1f
     mov r4,a
@@ -143,6 +148,9 @@ wt_pcm_primed'Idx'$:
     dec (pVoice + WT_INCREMENT_2)
     sjmp wt_pcm_cached'Idx'$
 wt_pcm_fetch'Idx'$:
+    ; MOVC is safe here because T10M v4 resources are accepted only from internal
+    ; Code Flash. Decrement the 16-bit remaining count after the successful fetch;
+    ; the final cached byte still receives its complete two-frame hold.
     mov dpl,(pVoice + WT_PHASE_0)
     mov dph,(pVoice + WT_PHASE_1)
     clr a
@@ -168,6 +176,11 @@ wt_pcm_cached'Idx'$:
     mov a,(pVoice + WT_INCREMENT_1)
     mov r1,#1
 wt_sample'Idx'$:
+    ; A is a signed 8-bit sample and R4 is unsigned gain. MUL AB is unsigned, so
+    ; the negative path corrects the high product byte afterward:
+    ;   unsigned(sample)*gain - 256*gain == signed(sample)*gain (mod 65536).
+    ; Carry/borrow is extended through R7, preserving a signed 24-bit sum across
+    ; all ten voices without per-lane saturation or authored-gain changes.
     mov b,r4
     jb a.7,wt_neg'Idx'$
 
@@ -216,19 +229,14 @@ wt_phase'Idx'$:
 wt_voice_done'Idx'$:
 .endm
 
-    ; Tonal controls use 7-bit gain. Signed sum >> 10 preserves the previous
-    ; ten-voice headroom while retaining two more low-level volume bits.
-    ; Saturate the remaining rare extreme before biasing to unsigned PWM.
-    mov a,r7
-    mov c,acc.7
-    rrc a
-    mov r7,a
-    mov a,r6
-    rrc a
-    mov r6,a
-    mov a,r5
-    rrc a
-    mov r5,a
+    ; Tonal controls use 7-bit gain. Arithmetic-shift the signed 24-bit sum once,
+    ; then select its high 16 bits: this is exactly signed sum >> 9 (one explicit
+    ; shift plus the implicit eight-bit byte selection), not sum >> 8 or >> 7.
+    ; mixOut keeps that signed 16-bit diagnostic value before clipping.
+    ;
+    ; A valid signed 8-bit result has high byte 0x00 with low bit7 clear, or high
+    ; byte 0xff with low bit7 set. All other sign combinations saturate to +127
+    ; or -128 and latch the sticky clip diagnostic before adding the PWM bias.
     mov a,r7
     mov c,acc.7
     rrc a
@@ -267,4 +275,3 @@ wt_clip_negative$:
 wt_output$:
     add a,#128
     mov (WT_SYNTH_ABS_ADDR + WT_PWM_OFFSET),a
-    ret

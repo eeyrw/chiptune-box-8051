@@ -50,12 +50,8 @@ void HardwareInit(void)
     P1M1 &= ~(1 << 6), P1M0 |= (1 << 6); // P1.6 推挽输出
     P16 = 1;
 
-
-    //P1M1 &= ~(1 << 7), P1M0 |= (1 << 7); // P1.7 推挽输出
-    //P17 = 1;
-
-    //P1M1 &= ~(1 << 2), P1M0 |= (1 << 2); // P1.2 推挽输出
-    //P12 = 1;
+    P1M1 &= ~((1 << 2) | (1 << 3));
+    P1M0 |= (1 << 2) | (1 << 3); // P1.2/P1.3: PWM2P/PWM2N 推挽输出
 
 #ifdef STC15F
 
@@ -119,6 +115,9 @@ void HardwareInit(void)
     PWMA_OC2_RelosdDisable();         //禁止输出比较的预装载
     PWMA_OC2_FastDisable();           //禁止输出比较快速功能
     PWMA_CC2E_Enable();               //开启输入捕获/比较输出
+    PWMA_CC2NE_Enable();              //PWM2N 输出反向 OC2REF
+    PWMA_CC2P_HighValid();
+    PWMA_CC2NP_HighValid();
 
 
     PWMA_OC4ModeSet(CCMRn_PWM_MODE2); //设置输出比较模式
@@ -138,8 +137,9 @@ void HardwareInit(void)
 
     PWMA_CCPCAPreloaded(0); //捕获/比较预装载控制位(该位只对具有互补输出的通道起作用)
     PWM2P_OUT_EN();
+    PWM2N_OUT_EN();
     PWM4N_OUT_EN();
-    PWMA_DeadTime(0);         //死区发生器设置
+    PWMA_DeadTime(0);         //左右桥臂严格反相，不插入半桥死区
     PWMA_BrakeOutputEnable(); //主输出使能
     PWMA_CEN_Enable();        //使能计数器
 

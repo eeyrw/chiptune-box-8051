@@ -1,6 +1,6 @@
 # Tracker10 XM compatible collection
 
-Collected and verified on 2026-08-13. The directory contains 149 complete XM/T10P
+Collected on 2026-08-13 and last fully rebuilt on 2026-08-14. The directory contains 149 complete XM/T10P
 pairs: 13 compile without warnings (`exact`), while 136 use one or more explicitly
 reported approximations (`approximate`). Every stored T10P matches a fresh compile
 byte for byte and passes T10P v4 structure/CRC validation.
@@ -26,6 +26,10 @@ To install one track without replacing the repository's built-in `scoreList.c`:
 ```bash
 make flash-xm TRACKER_INPUT="music/xm/Cerror/matrix (n-gen#06).xm"
 ```
+
+On the current board, start this command with the board powered off, wait for
+`Waiting for MCU, please cycle power`, and then power it on. Keep power stable
+until `Finishing write: done` and `Disconnected!` appear.
 
 Verify every stored T10P against a fresh compile and regenerate checksums:
 

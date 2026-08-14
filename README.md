@@ -1,79 +1,110 @@
 # Tracker10 8051
 
-STC8H3K64S2 上的 10 路 8-bit Tracker 音乐播放器。它不是 NES/APU
-模拟器：PC 端把 XM 编译为保留 order、pattern、乐器宏和效果语义的
-`T10M v4` 曲谱，并提取歌曲波表与短 PCM 打击采样。MCU 主线程运行受限
-tracker VM，并在主线程预渲染到 XRAM 音频环形缓冲；32 kHz ISR 只取一个
-字节写 PWM。
+运行在 STC8H3K64S2 上的十声道 8-bit 波表 tracker 播放器。PC 端把
+FastTracker II XM 离线编译为 `T10P/T10M v4`；MCU 不解析 XM，也不是 NES、
+APU、VRC、MIDI 或 DPCM 模拟器。
 
-## Build
+播放器保留 order、pattern、tracker tick、乐器包络和受支持的 effect 语义。
+主线程执行 tracker VM，并提前渲染到 256-byte XRAM 音频环；32 kHz Timer0 ISR
+只取一个字节写入 PWM。十个固定声部可使用歌曲自带的 16-point 波表、两种噪声
+或内部 Code Flash 中的 16 kHz PCM one-shot。
+
+## 快速开始
+
+主机构建需要 GNU Make、SDCC 和 Python 3；测试需要 `pytest`，下载和串口工具还
+需要 `stcgal`、`pyserial`。
 
 ```bash
+make clean
 make
-make flash
 make host-test
 ```
 
-时钟与硬件定时以 `Bsp.c` 的 `MAIN_Fosc=33177600UL` 为准。音频 ISR 为
-32 kHz，UART 为 115200 baud。
+默认构建链接根目录 `scoreList.c`，当前内容由仓库中的
+`music/xm/Quazar/funky stars.xm` 确定性生成。XM 的内部标题是
+`Hybrid song 2:20`，即 Funky Stars，不是另一首曲目。
 
-## Compile XM
+## 转换和下载 XM
+
+只读预检、生成 T10P/C 和检查容器：
 
 ```bash
-python3 tools/tracker10_tool.py inspect-xm song.xm
-python3 tools/tracker10_tool.py compile song.xm song.t10p --c-output scoreList.c
+python3 tools/tracker10_tool.py inspect-xm "song.xm"
+python3 tools/tracker10_tool.py compile "song.xm" song.t10p \
+  --c-output scoreList.c
 python3 tools/tracker10_tool.py inspect-t10p song.t10p
-make clean && make
 ```
 
-也可以使用：
+推荐使用隔离构建目标，不覆盖根目录 `scoreList.c`：
 
 ```bash
-make compile-tracker TRACKER_INPUT=song.xm TRACKER_OUTPUT=song.t10p
-```
+# XM -> T10P + scoreList.c + firmware HEX
+make xm-hex TRACKER_INPUT="song.xm" \
+  XM_HEX_OUTPUT=build/xm/song.hex
 
-从 XM 隔离生成 HEX 并直接下载，不覆盖仓库 `scoreList.c`：
-
-```bash
+# 完成相同构建后启动 stcgal 下载
 make flash-xm TRACKER_INPUT="song.xm" \
   XM_HEX_OUTPUT=build/xm/song.hex
 ```
 
-当前内置测试曲是 Quazar / Sanxion 的 Funky Stars 原始 10-channel XM 的
-波表化测试转换。源 XM 不纳入仓库，`scoreList.c` 是供当前硬件验证的编译结果。
-日后更换 XM 时的完整预检、转换、空间检查、下载、逐声道试听和排错流程见
-[docs/UsingXM.md](docs/UsingXM.md)。注意：当前板子播放的是编进内部 Code Flash
-的 `scoreList.c`，单独生成 `.t10p` 不会更换板上曲目。
-互联网 XM 的来源、检索方法、批量筛选标准和 2026-08-13 收集结果见
-[docs/XMCollection.md](docs/XMCollection.md)。
-可复现兼容曲库保存在 [`music/xm/`](music/xm/)，包括 149 对 XM/T10P、来源
-manifest、转换 warning 和 SHA-256；第三方版权说明见该目录 README。
+本板的可靠下载顺序是：先运行下载命令，等 `stcgal` 显示
+`Waiting for MCU, please cycle power`，再给板子重新上电；看到
+`Finishing write: done` 和 `Disconnected!` 才算完成。下载过程中不要断电。
 
-## Runtime
+`make flash` 只下载当前已经链接的 `music-box-8051.ihx`；它不会因为
+`build/xm/song.t10p` 被其他歌曲覆盖就自动选择那首歌。更换 XM 时优先使用
+`flash-xm`，或显式指定本次生成的 `SCORE_SOURCE`。
 
-- 10 个固定逻辑声道，不做动态复音分配。
-- 每声道可在 24-bit DDS 歌曲波表和 16 kHz PCM one-shot 间切换，并保留2种噪声模式。
-- 主线程的 10 路合成热路径由汇编完全展开；Timer0 ISR 是恒定时间的缓冲消费者。
-- 主线程按 tracker tick 执行效果、长音量包络、sustain、release 和 fadeout。
-- `T10M v4` 复用 pattern，并保存定时乐器宏、最多16张歌曲波表、PCM资源与
-  linear/Amiga 音高效果模型。
-- 曲谱正文带供主机工具校验的 CRC32；8051 不计算 CRC。不支持的 XM effect 和
-  volume-column command 会明确拒绝；已知乐器语义降级会由 `inspect-xm` 输出 warning。
-- v4 波表和 PCM 热路径只支持内部 Code Flash，并通过 `MOVC` 直接读取。SPI
-  后端源码仍保留，但不参与本阶段的 v4 音频资源播放。
+完整流程、空间检查、板上验收和问题定位见
+[使用其他 XM](docs/UsingXM.md)。Makefile 变量和所有 Python 工具见
+[Python 工具参考](docs/PythonTools.md)。
 
-串口示例：
+## 当前能力
+
+- 十个固定逻辑声道，不进行动态 voice allocation。
+- 最多 16 张歌曲波表；长非循环采样可成为 16 kHz PCM one-shot。
+- 音量保持 XM 的线性幅度语义；不做逐乐器 peak normalization、DC centering
+  或 PCM 类型专属增益。
+- 主线程执行 effect、定时包络、sustain、release、fadeout 和精确 tick 调度。
+- 四项控制队列与 255-sample 有效音频环吸收主线程延迟。
+- 全系统只使用寄存器组 0。Timer0 ISR 只消费一个音频字节，并显式保存
+  `A/DPTR/PSW/R0`；主线程的汇编渲染在内联合成前后只暂存三个跨采样寄存器。
+- PWM2P/P1.2 与 PWM2N/P1.3 输出严格互补的 Class-D 左右桥臂信号；硬件
+  `DTR=0`，不插入半桥死区。
+- 板载 P1.7/PWM4N LED 显示音频峰值，快速响应并按毫秒衰减。
+- T10M v4 的波表和 PCM 通过 `MOVC` 从内部 Code Flash 读取。SPI 后端仍编译和
+  自动探测，但 v4 音频资源不从 SPI 热路径读取。
+
+`Bsp.c` 的 `MAIN_Fosc=33177600UL` 决定 UART 和 Timer0 定时；Makefile 的
+`F_CPU` 默认值不是这两项时序的依据。程序区上限是 65,024 字节，XRAM 是
+3,072 字节。
+
+## 曲库
+
+[`music/xm/`](music/xm/) 保存 149 对 XM/T10P、来源 manifest、转换 warning 和
+SHA-256。13 首无 warning，136 首使用有明确报告的近似；每首都能单独装入内部
+Flash，但 149 首不能同时放入。第三方作品仍受原作者和来源站许可约束。
+
+互联网来源、检索和批量筛选方法见 [XM 曲库记录](docs/XMCollection.md)，当前
+兼容边界与后续可支持特性见 [XM 兼容性审计](docs/XMCompatibilityAudit.md)。
+
+## 板上诊断
+
+串口默认是 `/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0`，115200 baud：
 
 ```bash
-python3 tools/musicbox_proto.py ping
+python3 tools/musicbox_proto.py info
 python3 tools/musicbox_proto.py status
 python3 tools/musicbox_proto.py audio
 python3 tools/musicbox_proto.py mute 0x3fe
 python3 tools/musicbox_proto.py mute 0
 ```
 
-架构见 [docs/Tracker10Architecture.md](docs/Tracker10Architecture.md)，逐字节格式规范见
-[docs/T10Format.md](docs/T10Format.md)，
-串口协议见 [docs/Protocol.md](docs/Protocol.md)。
-所有 Python CLI、批处理脚本、生成器和 `tools/tracker10` 主机库的完整参考见
-[docs/PythonTools.md](docs/PythonTools.md)。
+串口命令必须串行执行，不能让两个 `musicbox_proto.py` 进程同时访问同一端口。
+正常播放应保持 parser error 为零、播放窗口内 underrun 不增长，并保持
+`isr_overrun=False`。当前 `>>9` 输出允许极少量 `clip` 锁存；应记录出现频率并
+试听对应段落，而不是只看某一次瞬时布尔值。
+
+架构见 [Tracker10Architecture.md](docs/Tracker10Architecture.md)，格式规范见
+[T10Format.md](docs/T10Format.md)，串口帧和命令见
+[Protocol.md](docs/Protocol.md)，测试要求见 [Testing.md](docs/Testing.md)。

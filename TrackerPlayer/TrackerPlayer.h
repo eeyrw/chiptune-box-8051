@@ -141,6 +141,4 @@ void TrackerPlayerPlay(MEM_XDATA(TrackerPlayer) *player);
 void TrackerPlayerNext(MEM_XDATA(TrackerPlayer) *player);
 void TrackerPlayerPrevious(MEM_XDATA(TrackerPlayer) *player);
 void TrackerPlayerSelect(MEM_XDATA(TrackerPlayer) *player, int16_t index);
-void TrackerPlayerSampleTick(void) __using(1);
-
 #endif

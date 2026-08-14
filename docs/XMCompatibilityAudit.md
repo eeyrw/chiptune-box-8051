@@ -45,7 +45,7 @@ The comparison used these sources:
   `e725a93b21cd5455e748dbac7b3173213367a8bb`;
 - libxmp at commit `a13276d27feabcf9ee4f982913f718ee05a65cb7`;
 - libxmp's FT2/XM event and mixer regression corpus;
-- the original `/home/yuan/funky stars.xm`, SHA-256
+- the checked-in `music/xm/Quazar/funky stars.xm`, SHA-256
   `2b7ce3c9efa7bb94067c1c7b00ed8b43433120f2ac2992903b09afd3d33739e3`.
 
 MilkyTracker or FT2-clone playback of the original module is the subjective
@@ -80,7 +80,8 @@ Effects actually used are:
 | `2xx` slide down | 25 | normalized |
 | `E93` retrigger | 1 | supported |
 
-The volume column contains 1,586 panning commands (`Cx`) and normal volume-set
+The played order sequence contains 794 volume-column panning commands (`Cx`)
+and normal volume-set
 commands. There are 68 new-note events without an instrument number, all on
 channel 5. There are no instrument-only rows.
 
@@ -106,15 +107,14 @@ Bounds checks reject truncated headers, pattern data and sample data.
 The parser currently does not retain:
 
 - sample default panning;
-- panning envelope points and flags;
-- instrument automatic-vibrato type, sweep, depth and rate;
+- panning envelope points and positions (it retains the enabled flag for warning);
 - the sample reserved/name-length byte and ModPlug ADPCM extension;
 - stereo and nonstandard compressed sample extensions.
 
-The compiler now parses these flags and reports warnings when active
-auto-vibrato or panning-envelope semantics will be dropped. This is explicit but
-still not faithful lowering; strict applications should treat warnings as a
-manual-review gate. Funky Stars instrument
+The compiler retains instrument automatic-vibrato type, sweep, depth and rate,
+plus the panning-envelope enabled flag, and reports warnings when those active
+semantics will be dropped. This is explicit but still not faithful lowering;
+strict applications should treat warnings as a manual-review gate. Funky Stars instrument
 21 uses automatic vibrato `(type=3, sweep=29, depth=5, rate=20)`, and instrument
 22 enables a panning envelope. Instrument 21 is actively used, so auto-vibrato
 loss is audible in this song.
@@ -145,18 +145,48 @@ This is exact in the long term. Speed remains ticks per row. The buffered audio
 consumer prevents main-loop latency from moving event boundaries. This part is
 sound and is not implicated by the hardware evidence.
 
-### 5.2 New note without instrument: definite bug
+### 5.2 Funky Stars perceived acceleration
+
+The source contains no `Fxx` commands: speed/BPM remain `6/130`. All 19 orders
+reference 64-row patterns and each order therefore lasts 7.3846 seconds. The
+note-event counts by order are:
+
+```text
+38, 100, 106, 275, 283, 313, 309, 339, 339, 261,
+220, 313, 309, 339, 339, 128, 280, 275, 283
+```
+
+The transition into order 3 at 22.1538 seconds introduces much denser drums and
+subdivision. After the 140.3077-second first pass, restart order 3 also skips the
+sparse first three orders; subsequent loops are 118.1538 seconds. Both changes
+sound faster without changing tracker tick duration.
+
+Live status sampling after a track restart measured these pairs:
+
+| Host elapsed | VM order/row/tick | Nominal score position |
+|---:|---:|---:|
+| 0.000 s | 0/2/3 | 0.288 s |
+| 5.038 s | 0/46/1 | 5.327 s |
+| 10.075 s | 1/25/5 | 10.365 s |
+| 15.111 s | 2/5/3 | 15.404 s |
+| 20.148 s | 2/49/1 | 20.442 s |
+| 25.186 s | 3/28/5 | 25.481 s |
+
+The roughly 0.29-second decode-ahead offset is constant and comes from the
+four-entry control queue. It does not accumulate, parser error stays zero, and
+the hardware evidence therefore rejects a progressive clock or scheduler speedup.
+
+### 5.3 New note without instrument: fixed
 
 FT2 plays a new note without an instrument number using the current instrument,
-sample and current channel volume. Tracker10 currently resets channel volume to
-64 for every new note unless that same cell has a volume command. This is wrong.
+sample and current channel volume. Tracker10 now resets channel volume only when
+the row selects an instrument; a note-only row preserves the current value, and
+a same-cell volume command still wins.
 
-Funky Stars hits this case 68 times on channel 5, so the bug is not theoretical.
-The fix is small: reset channel volume to 64 only when a new instrument is
-present; otherwise retain the current volume. A same-cell volume command still
-wins.
+Funky Stars hits the note-only case 68 times on channel 5, so this behavior is
+covered by the checked-in source and host tests.
 
-### 5.3 Instrument without note
+### 5.4 Instrument without note
 
 FT2 keeps the current sample playing, restores the old sample's default volume
 and panning, and retriggers instrument envelope state. Tracker10 immediately
@@ -164,7 +194,7 @@ replaces the channel's compiled instrument definition. Funky Stars has no such
 rows, but a general compiler needs either normalized explicit operations or a
 compile-time rejection until the behavior is represented.
 
-### 5.4 Tone portamento
+### 5.5 Tone portamento
 
 The important high-level rule is present: a note with `3xx` sets a target and
 does not restart oscillator phase or instrument envelopes. Parameter memory is
@@ -172,13 +202,13 @@ implemented. The conversion of Amiga-period increments to Q8.8 note increments
 is an approximation and should be tested against reference traces over the note
 range, especially at low notes.
 
-### 5.5 Arpeggio
+### 5.6 Arpeggio
 
 For ordinary speed values, the base, high-nibble and low-nibble cycle is
 correct. FT2 has an out-of-bounds lookup quirk for ticks 16..31; Tracker10 uses a
 clean modulo-three model. This song uses speed 6, so the quirk is irrelevant.
 
-### 5.6 Vibrato
+### 5.7 Vibrato
 
 The apparent factor-of-four difference is not a bug. FT2 advances a 256-step
 phase by `4*x`; Tracker10 advances a 64-step phase by `x`, producing the same
@@ -191,26 +221,26 @@ cycle duration. Remaining differences are:
 
 These differences explain earlier reports that some vibrato sounded unusual.
 
-### 5.7 Volume slide
+### 5.8 Volume slide
 
 `Axy` parameter memory and tick-1-through-last execution agree with FT2 for the
 values used here. FT2 gives the high nibble priority when both are nonzero;
 Tracker10 does the same.
 
-### 5.8 `E9x` retrigger
+### 5.9 `E9x` retrigger
 
 FT2 restarts the sample and retriggers instrument state. Tracker10 also resets
 its compiled volume/pitch macro and fade state. The tick condition must remain
 covered by a trace test because FT2 internally counts ticks down, but the one
 `E93` in Funky Stars is not responsible for the repeated channel-8 symptom.
 
-### 5.9 Note-off and fadeout: definite scale bug
+### 5.10 Note-off and fadeout: fixed
 
 FT2 initializes fadeout to 32768 and subtracts the instrument fadeout value once
-per released tick. T10 initializes it to 65535 and subtracts the unscaled source
-value. Release therefore lasts roughly twice as long. Correcting the initial
-range also requires changing the output scaling divisor; changing only one side
-would halve released-note volume.
+per released tick. T10 now initializes the state to `0x8000`, subtracts with
+saturation and scales released output in the same 32768 domain. The former
+65535-domain behavior, which made releases roughly twice as long, is no longer
+present.
 
 Funky Stars' PCM instruments have no volume envelope and therefore cut according
 to the existing no-envelope rule. The fadeout bug mainly affects its tonal
@@ -240,20 +270,20 @@ Long non-looped samples become fixed-rate one-shots. The source playback rate
 at the most common trigger note is baked into the resampling operation. Funky
 Stars produces:
 
-| PCM ID | XM instrument | Common note | Source playback rate | 8 kHz bytes |
+| PCM ID | XM instrument | Common note | Source playback rate | 16 kHz bytes |
 |---:|---:|---:|---:|---:|
-| 0 | 2 | 61 | 16.726 kHz | 679 |
-| 1 | 3 | 54 | 11.163 kHz | 1,365 |
-| 2 | 4 | 61 | 16.726 kHz | 963 |
-| 3 | 5 | 61 | 17.721 kHz | 1,335 |
-| 4 | 6 | 61 | 16.726 kHz | 843 |
+| 0 | 2 | 61 | 16.726 kHz | 1,357 |
+| 1 | 3 | 54 | 11.163 kHz | 2,729 |
+| 2 | 4 | 61 | 16.726 kHz | 1,925 |
+| 3 | 5 | 61 | 17.721 kHz | 2,669 |
+| 4 | 6 | 61 | 16.726 kHz | 1,685 |
 
-The current converter uses pointwise linear interpolation but no low-pass
-filter before downsampling. Spectral analysis of the five source voices found
+The retained converter uses a bounded 16-tap windowed-sinc low-pass resampler.
+The earlier 8 kHz prototype used pointwise interpolation without a low-pass
+filter. Spectral analysis of the five source voices in that prototype found
 approximately `3.5%, 0.8%, 38.5%, 87.3%, 2.3%` of energy above the 8 kHz
-resource Nyquist limit. PCM IDs 2 and 3 therefore alias heavily. ID 4, used on
-channel 8, has little out-of-band energy, so aliasing alone does not fully
-explain that channel's subjective effect.
+resource Nyquist limit, so PCM IDs 2 and 3 aliased heavily. Those figures explain
+why the 8 kHz path was replaced; they do not describe the current 16 kHz output.
 
 ### 6.3 PCM pitch and control after trigger
 
@@ -305,12 +335,15 @@ Panning envelopes require tick automation or an offline approximation.
 
 The 32 kHz Timer0 ISR only consumes a byte from the 255-sample effective XRAM
 ring and writes PWM. Synthesis and event application run ahead in the main
-thread. Hardware diagnostics during the faulty-sounding passages show no new
-audio-ring underruns, no ISR overrun and no final saturation.
+thread. Hardware diagnostics during the earlier shift-by-ten investigation
+showed no new audio-ring underruns, ISR overrun or final saturation. With the
+current one-bit-louder shift-by-nine output, a 20-second single-client run saw
+one clip latch in 449 samples, no ISR-overrun latch and no active-window
+underrun growth; rare saturation is therefore an explicit listening tradeoff.
 
-The ten-lane mixer uses a 24-bit accumulator and shifts by ten before signed
-8-bit saturation. Tonal control gain is 7-bit, so its full-scale gain equals the
-older 5-bit/shift-by-eight design while retaining two extra quiet-volume bits.
+The ten-lane mixer uses a 24-bit accumulator and shifts by nine before signed
+8-bit saturation. Tonal control gain is 7-bit; this is one bit louder than the
+previous shift-by-ten setting while retaining two extra quiet-volume bits.
 PCM's five-bit control is multiplied by four to map it into the same seven-bit
 linear gain domain before accumulation. It receives no additional type-specific
 gain. Earlier 1.5x and 2x PCM experiments, global RMS normalization and PCM-body
@@ -327,8 +360,8 @@ window, not assume a nonzero absolute value means an active-playback underrun.
 The implemented 16 kHz experiment confirms this is feasible for the song:
 
 - PCM storage grows from 5,185 to 10,365 bytes;
-- the experiment image was 58,546 bytes in the 65,024-byte program region, leaving a
-  smaller but usable margin;
+- the current faithful-volume image is 60,797 bytes in the 65,024-byte program
+  region, leaving 4,227 bytes;
 - XRAM and hot DATA layouts do not grow;
 - the PCM cache hold changes from four output frames to two;
 - Code Flash fetch frequency doubles only while PCM voices are active;

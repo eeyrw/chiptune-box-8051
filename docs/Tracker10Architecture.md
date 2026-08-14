@@ -94,8 +94,10 @@ unused high mute-state bits and add no hot DATA or XRAM.
 There are ten fixed source/runtime channels and no MCU voice allocator. Each
 channel retains note and portamento target, volume, current effect, remembered
 effect parameters, vibrato phase, key-on/release state, fadeout, instrument
-definition and macro cursors. An active 48-byte instrument record is copied from score storage to XRAM, so
-macro evaluation never thrashes the SPI cache.
+definition and macro cursors. An active 48-byte instrument record is copied from
+score storage to XRAM, so macro evaluation never rereads Code Flash. The retained
+SPI backend has its own cache, but T10M v4 tracks are rejected on SPI because
+their audio resources require internal-Code-Flash `MOVC` access.
 
 At roughly 50 tracker ticks per second, the VM produces a `TrackerControlEvent`.
 Only changed voices are marked, although the four queue slots have fixed size to
@@ -103,16 +105,18 @@ keep the ISR bounded. Each event contains an exact output-sample wait. Four
 slots provide tens of milliseconds of main-loop and SPI-read tolerance.
 
 The queue producer writes a complete slot before advancing its 8-bit tail. The
-ISR reads a slot only after observing that tail. Head and tail updates are atomic
-on the 8051; queue reset disables interrupts around the shared state change.
-The main thread applies due tracker controls, calls the ten-lane unrolled
-`WavetableSynthStep.s`, and publishes complete unsigned samples into a 256-byte
+main-thread renderer reads a slot only after observing that tail and advances
+head only after applying the complete event. Head and tail byte updates are
+atomic on the 8051.
+The main thread applies due tracker controls and runs the ten-lane unrolled
+`WavetableSynthStep.inc` body directly inside `AudioRender.s`, then publishes complete unsigned samples into a 256-byte
 XRAM ring. Monotonic 8-bit indices give 255 usable bytes, or 7.97 milliseconds
 at 32 kHz. `AudioRenderProcess` renders at most 16 samples per main-loop visit,
 keeping protocol service responsive while maintaining average producer speed.
 The write index advances only after a sample byte is complete; Timer0 owns the
-read index. Timer0 uses register bank 2, while `AudioRenderOne` temporarily uses
-bank 1, so an interrupt can safely preempt rendering.
+read index. There are no per-sample calls and the whole firmware uses register
+bank 0. The renderer stacks its three outer batch values around the inline path;
+Timer0 explicitly saves only `A`, `DPTR`, `PSW` and `R0` before consuming a byte.
 
 The same main-thread render batch reports its peak distance from PWM center.
 `VisualizeSound` applies immediate attack and a millisecond-based decay, then
@@ -133,8 +137,10 @@ Each fixed voice occupies eight absolute DATA bytes:
 Ten voices consume 80 bytes. The remaining absolute state is `mixOut` (2), PWM
 sample (1), debug mute mask (2), long noise state (2), short noise state (1) and
 two current signed noise samples (2). The complete block is 90 bytes at DATA
-`0x21`. Register bank 1 belongs to Timer0. The linked stack begins at `0x7B`,
-leaving 133 bytes.
+`0x21`. No alternate register bank is reserved. Ordinary DATA already occupies
+bank-1 addresses beginning at `0x08`; the free `0x0E..0x1F` hole remains
+available for explicitly placed future state. The linked stack begins at
+`0x7B`, leaving 133 bytes.
 
 Tonal voices use signed 16-sample tables from the active song's internal Code
 Flash resource bank. PCM voices read signed 16 kHz one-shots from the same image
@@ -163,12 +169,22 @@ silence discontinuity without adding per-voice release state or renderer work.
 
 Each lane performs mute/volume tests, oscillator selection, signed sample by
 unsigned volume multiplication, 24-bit accumulation and phase advance. The
-final sum is shifted by ten, giving ten simultaneously loud voices shared
-headroom, then saturated to signed 8-bit and biased by 128 for PWM. Tonal lanes
-retain 7-bit gain; this is the same full-scale
-gain as the earlier 5-bit gain with a shift by 8, but preserves two extra bits
-for quiet source volumes and envelopes. Muting
+final sum is shifted by nine, then saturated to signed 8-bit and biased by 128
+for PWM. This is one bit louder than the earlier 7-bit-gain/shift-by-ten
+setting. Tonal lanes retain 7-bit gain, preserving two extra bits for quiet
+source volumes and envelopes. Muting
 suppresses mixing but continues phase advance.
+
+PWM2P on P1.2 carries the unsigned sample duty and PWM2N on P1.3 is the hardware
+complement (`256 - duty`, equivalent to `~duty + 1` in eight bits). These pins
+drive opposite Class-D bridge legs, not upper and lower switches of one half
+bridge, so `PWMA_DTR` is deliberately zero. P1.7/PWM4N remains the separate
+audio-level visualization LED output.
+
+The complementary-output setup follows the local STC8H manual, sections 25.9.16
+(`PWMx_CCER1` polarity/enable), 25.9.34 (`PWMx_DTR`) and 25.10.16 (complementary
+PWM example). The manual's dead-time facility is intentionally disabled for
+this board-level bridge topology.
 
 ## Memory and current build
 
@@ -177,11 +193,16 @@ build uses:
 
 | Resource | Used | Available |
 |---|---:|---:|
-| program Flash | 59,491 bytes | 65,024-byte programmed region |
+| program Flash | 60,797 bytes | 65,024-byte programmed region |
 | XRAM | 2,885 bytes | 3,072 bytes |
 | absolute DATA hot state | 90 bytes | fixed at `0x21` |
+| linked DATA | 110 bytes | only register bank 0 reserved |
 | stack | 133 bytes | starts at `0x7B` |
-| T10P score image | 29,779 bytes | internal Code Flash |
+| T10P score image | 30,564 bytes | internal Code Flash |
+
+These values are from a clean build of the checked-in, faithful-linear-volume
+Funky Stars `scoreList.c`; its five PCM resources total 10,365 bytes. The fixed
+firmware overhead is 30,233 bytes for collection capacity estimates.
 
 The SPI backend remains compiled and retains a 1 KiB XRAM read cache. T10M v4
 audio resources are internal-Code-Flash-only and opening v4 from SPI is rejected.
@@ -245,6 +266,20 @@ were masked by normalized tonal voices. That policy was removed when source
 amplitudes were made faithful: XM sample, channel and envelope volumes are
 linear factors, tonal wavetables retain their source amplitude, and PCM receives
 no type-specific boost.
+
+The reported Funky Stars late-song acceleration was checked against the source
+orders and live hardware on 2026-08-14. The XM contains no `Fxx`; speed and BPM
+stay at 6 and 130. Every 64-row order lasts 7.3846 seconds. Note-event density
+rises from 38/100/106 in orders 0..2 to 275 in order 3 and commonly 275..339
+afterward. The first pass lasts 140.3077 seconds, then restart order 3 skips the
+22.1538-second sparse introduction. This arrangement and loop seam change
+perceived pace without changing tick duration.
+
+A from-start hardware sample advanced from a nominal score position of 0.288
+seconds to 25.481 seconds during 25.186 seconds of wall time. The approximately
+0.29-second offset was already present at the first sample because the four-slot
+control queue decodes ahead; it did not grow. Parser error remained zero. This
+rules out progressive Timer0, tick-remainder or queue-induced acceleration.
 
 The first v4 PCM build latched Timer0 deadline overruns at tracker-event
 boundaries despite a full producer queue. Replacing the C queue consumer with a

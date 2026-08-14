@@ -45,8 +45,5 @@ void WavetableSynthSetMuteMask(uint16_t mask);
 void AudioBufferInit(void);
 uint8_t AudioRenderProcess(void);
 uint8_t AudioBufferLevel(void);
-void AudioRenderOne(void) __using(1);
 uint32_t WavetablePitchToIncrement(uint16_t pitch);
-void WavetableSynthStep(void) __using(1);
-
 #endif

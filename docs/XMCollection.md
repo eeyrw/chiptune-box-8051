@@ -77,7 +77,7 @@ column 或损坏资源；生成完整且 CRC 有效的 T10P；最终 clean link 
 对 Modland 的 Cerror、Dalezy、Dubmood 共 390 首本地 XM 重扫：加入 `Bxx/Dxx`
 控制流、`ECx` note cut、volume-column `6x/7x` lowering，并对 `6xy`、`9xx`、
 `EDx`、volume-column `8x/9x` 作明确告警的有损近似后，转换通过数从 28 提升到
-152；按当前 29,712 字节固定固件开销计算，143 首可单独链接，9 首因 T10P 过大
+152；按当时的固定固件开销计算，143 首可单独链接，9 首因 T10P 过大
 排除。`music/xm/MANIFEST.tsv` 保存逐首结果、warning、哈希和 URL。
 加上单独收录的 JAM、Super Mario 2、Traven Tetris high scores、贝多芬
 `Fur Elise`、Rez + Kenet 的 `Unreeeal Superhero 3` 和 Quazar 的
@@ -85,6 +85,11 @@ column 或损坏资源；生成完整且 CRC 有效的 T10P；最终 clean link 
 `approximate`。按忠实线性音量模型重建后，149 首均可单独装入当前
 65,024-byte 程序区；全部通过 fresh compile
 逐字节比对和 SHA-256 校验。
+
+2026-08-14 再次以当前线性音量 lowering 和 Funky Stars clean build 校准容量：
+固件总计 60,797 字节，其中 T10P 为 30,564 字节，固定开销为 30,233 字节。
+MANIFEST 中的 149 首仍全部能单独装入 65,024-byte 程序区。容量边缘曲目仍须用
+自己的 `scoreList.c` 做真实 clean link，不能只依赖批处理估算。
 
 `Unreeeal Superhero 3` 来源：
 
