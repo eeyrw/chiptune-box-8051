@@ -69,8 +69,9 @@ make flash-xm TRACKER_INPUT="song.xm" \
 - 四项控制队列与 255-sample 有效音频环吸收主线程延迟。
 - 全系统只使用寄存器组 0。Timer0 ISR 只消费一个音频字节，并显式保存
   `A/DPTR/PSW/R0`；主线程的汇编渲染在内联合成前后只暂存三个跨采样寄存器。
-- PWM2P/P1.2 与 PWM2N/P1.3 输出严格互补的 Class-D 左右桥臂信号；硬件
-  `DTR=0`，不插入半桥死区。
+- Class-D 计划使用 PWM2 硬件互补对且 `DTR=0`。当前 PWM2P/P1.2 有效，但
+  `STC8H3K64S2` 没有 P1.3，因而当前 `PWM2N/P1.3` 配置不能形成第二路物理输出；
+  完整互补对需在确认 PCB 后改用 P2.2/P2.3。
 - 板载 P1.7/PWM4N LED 显示音频峰值，快速响应并按毫秒衰减。
 - T10M v4 的波表和 PCM 通过 `MOVC` 从内部 Code Flash 读取。SPI 后端仍编译和
   自动探测，但 v4 音频资源不从 SPI 热路径读取。
@@ -107,4 +108,6 @@ python3 tools/musicbox_proto.py mute 0
 
 架构见 [Tracker10Architecture.md](docs/Tracker10Architecture.md)，格式规范见
 [T10Format.md](docs/T10Format.md)，串口帧和命令见
-[Protocol.md](docs/Protocol.md)，测试要求见 [Testing.md](docs/Testing.md)。
+[Protocol.md](docs/Protocol.md)，测试要求见 [Testing.md](docs/Testing.md)，尚未实现的
+计划项见 [Backlog.md](docs/Backlog.md)，硬件引脚与 PWM 冲突盘点见
+[HardwareInvestigation.md](docs/HardwareInvestigation.md)。

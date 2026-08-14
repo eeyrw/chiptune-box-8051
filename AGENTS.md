@@ -30,8 +30,11 @@ does not parse tracker effects in real time.
 - `AudioRender.s` is the main-thread render hot path and contains no per-sample
   calls. It includes the ten-lane unrolled `WavetableSynthStep.inc` body and
   briefly stacks the three batch registers that live across each inline step.
-- PWM2P/P1.2 and PWM2N/P1.3 drive opposite Class-D bridge legs. They are strict
-  complements with hardware dead time set to zero.
+- The intended Class-D output is a PWM2 hardware-complementary pair with dead
+  time zero. On STC8H3K64S2, PWM2P/P1.2 is valid but P1.3 does not exist; do not
+  describe the current P1.2/P1.3 setup as a working pair. The valid PWM2 pair is
+  P2.2/P2.3, subject to PCB connectivity verification. See
+  `docs/HardwareInvestigation.md`.
 - Main loop runs effects, timed envelopes, release/fadeout, fills a four-entry
   control queue, and pre-renders a 255-sample effective audio ring.
 - Pitch conversion, effects and instrument state belong in the main loop, never ISR.

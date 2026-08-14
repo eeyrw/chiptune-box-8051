@@ -175,16 +175,26 @@ setting. Tonal lanes retain 7-bit gain, preserving two extra bits for quiet
 source volumes and envelopes. Muting
 suppresses mixing but continues phase advance.
 
-PWM2P on P1.2 carries the unsigned sample duty and PWM2N on P1.3 is the hardware
-complement (`256 - duty`, equivalent to `~duty + 1` in eight bits). These pins
-drive opposite Class-D bridge legs, not upper and lower switches of one half
-bridge, so `PWMA_DTR` is deliberately zero. P1.7/PWM4N remains the separate
-audio-level visualization LED output.
+CCR2 is configured for a PWM2 hardware complement: PWM2P carries the unsigned
+sample duty and PWM2N carries `256 - duty` (equivalent to `~duty + 1` in eight
+bits). The intended outputs drive opposite Class-D bridge legs, not upper and
+lower switches of one half bridge, so `PWMA_DTR` is deliberately zero.
 
-The complementary-output setup follows the local STC8H manual, sections 25.9.16
-(`PWMx_CCER1` polarity/enable), 25.9.34 (`PWMx_DTR`) and 25.10.16 (complementary
-PWM example). The manual's dead-time facility is intentionally disabled for
-this board-level bridge topology.
+The current pin selection requests PWM2P/P1.2 and PWM2N/P1.3, but that physical
+pair is not available on STC8H3K64S2. Its device-specific pin table provides
+PWM2P on P1.2 without PWM2N and provides the complete pair only on P2.2/P2.3.
+Therefore the present firmware configuration can drive P1.2 but must not be
+considered a verified differential Class-D output. The intended correction is
+P2.2/P2.3 after PCB connectivity is confirmed. P1.7/PWM4N is valid and remains
+the separate audio-level visualization LED output. The full audit is in
+[HardwareInvestigation.md](HardwareInvestigation.md).
+
+The complementary-output register setup follows the local STC8H manual,
+sections 25.9.16 (`PWMx_CCER1` polarity/enable), 25.9.34 (`PWMx_DTR`) and
+25.10.16 (complementary PWM example). Pin availability additionally follows the
+STC8H3K64S2-specific tables in sections 4.9.1 and 4.9.2; the generic header's
+P1.3 comment is not valid for this target. The manual's dead-time facility is
+intentionally disabled for this board-level bridge topology.
 
 ## Memory and current build
 

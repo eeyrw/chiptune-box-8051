@@ -37,10 +37,19 @@ include startup history. Use the 10-bit mute mask to isolate each voice.
 P5.5 is high for the complete Timer0 ISR and can be measured to determine the
 worst-case CPU duty cycle at 32 kHz.
 
-For the Class-D output, verify P1.2/PWM2P and P1.3/PWM2N with an oscilloscope.
-They must be strict logical complements with no intentional dead-time gap;
-`PWMA_DTR` is zero because the pins drive opposite bridge legs. This physical
-relationship cannot be established by the UART audio diagnostic alone.
+The current P1.2/P1.3 Class-D configuration is not a valid complementary pair
+on STC8H3K64S2: PWM2P exists on P1.2, but this MCU has no P1.3 pin. Do not treat
+a UART `audio` response or register readback as evidence that PWM2N is present.
+See [HardwareInvestigation.md](HardwareInvestigation.md) for the pin-multiplexing
+audit.
+
+After PCB connectivity has been confirmed and PWM2 is moved to the supported
+P2.2/P2.3 mapping, verify both physical pins with an oscilloscope. They must be
+strict logical complements for duties 0, 128 and 255, with no intentional
+dead-time gap. Also confirm that startup is centered at duty 128 or that both
+outputs remain disabled until the audio ring is primed. `PWMA_DTR` remains zero
+because the outputs drive opposite bridge legs, not two switches in one half
+bridge. This physical relationship cannot be established by UART diagnostics.
 
 All serial checks must run sequentially. Two clients opening the same UART at
 once can exchange each other's response frames and produce false protocol
