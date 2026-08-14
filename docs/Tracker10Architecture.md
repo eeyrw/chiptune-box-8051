@@ -13,6 +13,10 @@ instrument envelopes remain compact objects in the device score.
 
 ## Compilation pipeline
 
+Teaching-oriented walkthrough of this pipeline:
+[XMCompilation.md](XMCompilation.md).
+
+
 ```text
 XM bytes
   -> bounds-checked XM parser

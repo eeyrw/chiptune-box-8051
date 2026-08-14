@@ -4,6 +4,8 @@
 解析；8051 播放的是编译后的 `T10P/T10M v4` 语义曲谱、16 字节波表和 16 kHz
 PCM one-shot。
 各 Python 命令的完整参数和副作用见 [PythonTools.md](PythonTools.md)。
+若要理解 XM 字节如何一步步变成 T10P，见教学文档
+[XMCompilation.md](XMCompilation.md)。
 
 ## 1. 环境与输入要求
 

@@ -56,7 +56,8 @@ make flash-xm TRACKER_INPUT="song.xm" \
 `flash-xm`，或显式指定本次生成的 `SCORE_SOURCE`。
 
 完整流程、空间检查、板上验收和问题定位见
-[使用其他 XM](docs/UsingXM.md)。Makefile 变量和所有 Python 工具见
+[使用其他 XM](docs/UsingXM.md)。XM 如何被编译成 T10P 的教学说明见
+[XM 编译导读](docs/XMCompilation.md)。Makefile 变量和所有 Python 工具见
 [Python 工具参考](docs/PythonTools.md)。
 
 ## 当前能力
